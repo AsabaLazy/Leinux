@@ -1,0 +1,25 @@
+[Unit]
+Description=open-Raijin Daemon Service
+After=network.target leigod_plugin.service
+Wants=leigod_plugin.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/leigod
+Environment=LEIGOD_WEBUI_HOST=127.0.0.1
+Environment=LEIGOD_WEBUI_PORT=8088
+EnvironmentFile=-/etc/default/leigod-webui
+ExecStart=/usr/bin/leigod-webui --daemon
+Restart=on-failure
+RestartSec=3
+
+StateDirectory=leigod
+StateDirectoryMode=0700
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/leigod/config /var/lib/leigod
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
