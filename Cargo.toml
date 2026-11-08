@@ -1,12 +1,12 @@
 [package]
-name = "open-raijin"
+name = "leinux"
 version = "1.3.0"
 edition = "2021"
 description = "Native GTK4 GUI, CLI, and daemon for Leigod Accelerator on Linux"
 license = "MIT"
 
 [[bin]]
-name = "open-raijin"
+name = "leinux"
 path = "src/main.rs"
 
 [dependencies]

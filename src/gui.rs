@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const APP_ID: &str = "io.github.asabalazy.open-raijin";
+const APP_ID: &str = "io.github.asabalazy.leinux";
 const TOKEN_SNIPPET: &str = r#"copy(JSON.parse(localStorage.getItem("account_token")).account_token)"#;
 const SPARK_POINTS: usize = 30;
 
@@ -336,7 +336,7 @@ fn build_ui(app: &adw::Application) {
     // Main window: header bar + clamped column of boxed lists.
     let win = adw::ApplicationWindow::builder()
         .application(app)
-        .title("open-Raijin")
+        .title("Leinux")
         .icon_name(APP_ID)
         .default_width(460)
         .default_height(760)
@@ -344,14 +344,14 @@ fn build_ui(app: &adw::Application) {
     gtk::IconTheme::for_display(&gtk::prelude::WidgetExt::display(&win))
         .add_search_path("/opt/leigod/webui");
 
-    let window_title = adw::WindowTitle::new("open-Raijin", "正在连接服务…");
+    let window_title = adw::WindowTitle::new("Leinux", "正在连接服务…");
     let settings_btn = gtk::Button::from_icon_name("emblem-system-symbolic");
     settings_btn.set_tooltip_text(Some("设置"));
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&window_title));
     header.pack_end(&settings_btn);
 
-    let status_icon = gtk::Image::from_icon_name("io.github.asabalazy.open-raijin-symbolic");
+    let status_icon = gtk::Image::from_icon_name("io.github.asabalazy.leinux-symbolic");
     status_icon.set_pixel_size(96);
     status_icon.add_css_class("dim-label");
     let status_title = gtk::Label::new(Some("未加速"));

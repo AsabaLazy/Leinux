@@ -1,10 +1,10 @@
 [Desktop Entry]
-Name=open-Raijin
-Name[zh_CN]=open-Raijin (雷神加速控制台)
-Comment=open-Raijin control panel for Linux
+Name=Leinux
+Name[zh_CN]=Leinux (雷神加速控制台)
+Comment=Leinux control panel for Linux
 Exec=/usr/bin/leigod-webui
-Icon=io.github.asabalazy.open-raijin
+Icon=io.github.asabalazy.leinux
 Terminal=false
 Type=Application
 Categories=Network;Game;
-StartupWMClass=io.github.asabalazy.open-raijin
+StartupWMClass=io.github.asabalazy.leinux

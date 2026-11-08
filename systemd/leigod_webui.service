@@ -1,5 +1,5 @@
 [Unit]
-Description=open-Raijin Daemon Service
+Description=Leinux Daemon Service
 After=network.target leigod_plugin.service
 Wants=leigod_plugin.service
 

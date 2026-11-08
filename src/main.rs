@@ -97,7 +97,7 @@ fn print_help() {
     println!(
         "用法: lgd [选项]  (或 leigod-webui [选项])
 
-open-Raijin — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
+Leinux — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
 
 选项:
   (无参数)             自动拉起后台服务并打开原生 GTK4 控制面板窗口

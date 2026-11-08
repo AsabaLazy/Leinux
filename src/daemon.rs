@@ -1268,7 +1268,7 @@ fn handle_client(stream: TcpStream) {
         match path {
             "/" | "/index.html" => {
                 let html_path = Path::new(LEIGOD_DIR).join("webui/index.html");
-                let body = fs::read(html_path).unwrap_or_else(|_| b"open-Raijin daemon running".to_vec());
+                let body = fs::read(html_path).unwrap_or_else(|_| b"Leinux daemon running".to_vec());
                 send_http(stream, 200, "text/html; charset=utf-8", &body);
             }
             "/api/host-status" => {
@@ -1502,7 +1502,7 @@ pub fn run_daemon() {
         thread::sleep(Duration::from_millis(1500));
     });
 
-    println!("open-Raijin daemon running at http://{host}:{port}");
+    println!("Leinux daemon running at http://{host}:{port}");
     while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {

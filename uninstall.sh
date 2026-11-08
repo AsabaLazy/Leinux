@@ -24,8 +24,8 @@ rm -f /etc/systemd/system/leigod_plugin.service \
       /usr/bin/leigod-webui \
       /usr/bin/lgd \
       /usr/share/applications/leigod-webui.desktop \
-      /usr/share/icons/hicolor/scalable/apps/io.github.asabalazy.open-raijin.svg \
-      /usr/share/icons/hicolor/symbolic/apps/io.github.asabalazy.open-raijin-symbolic.svg \
+      /usr/share/icons/hicolor/scalable/apps/io.github.asabalazy.leinux.svg \
+      /usr/share/icons/hicolor/symbolic/apps/io.github.asabalazy.leinux-symbolic.svg \
       /usr/share/polkit-1/rules.d/50-leigod-plugin.rules
 systemctl daemon-reload 2>/dev/null || true
 rm -rf /opt/leigod /run/leigod
@@ -38,4 +38,4 @@ if [ "${LEIGOD_PURGE_STATE:-0}" = "1" ]; then
     rm -rf /var/lib/leigod
 fi
 
-echo "[INFO] open-Raijin 已卸载。"
+echo "[INFO] Leinux 已卸载。"

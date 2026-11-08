@@ -1,4 +1,4 @@
-# open-Raijin
+# Leinux
 
 雷神加速器 x86_64 Linux 原生客户端（Rust + GTK4 + libadwaita），集成了原生桌面 GUI、`lgd` 命令行工具与后台路由守护进程。
 
@@ -21,8 +21,8 @@ paru -S leigod-plugin-bin
 ### 通用 Linux (Debian / Ubuntu / Fedora / Arch / openSUSE)
 
 ```bash
-git clone https://github.com/AsabaLazy/open-Raijin.git
-cd open-Raijin
+git clone https://github.com/AsabaLazy/Leinux.git
+cd Leinux
 sudo ./install.sh
 ```
 
@@ -30,7 +30,7 @@ sudo ./install.sh
 
 ### 1. 启动原生 GTK4 控制面板
 
-从桌面应用菜单点击 **open-Raijin**，或在终端执行：
+从桌面应用菜单点击 **Leinux**，或在终端执行：
 
 ```bash
 lgd

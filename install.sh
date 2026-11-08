@@ -22,8 +22,8 @@ elif command -v zypper >/dev/null 2>&1; then
     zypper --non-interactive install ca-certificates curl iproute2 ipset iptables procps gtk4-devel libadwaita-devel cargo rust pkg-config
 fi
 
-if [ ! -x "$SCRIPT_DIR/target/release/open-raijin" ]; then
-    echo "[INFO] 正在编译 open-Raijin (Rust + GTK4)..."
+if [ ! -x "$SCRIPT_DIR/target/release/leinux" ]; then
+    echo "[INFO] 正在编译 Leinux (Rust + GTK4)..."
     (cd "$SCRIPT_DIR" && cargo build --release)
 fi
 
@@ -48,13 +48,13 @@ install -Dm644 "$tmp_dir/ipdatacloud_country.xdb" "$BASE/config/ipdatacloud_coun
 install -Dm755 "$SCRIPT_DIR/opt/leigod/steamdeck_acc_monitor.sh" "$BASE/steamdeck_acc_monitor.sh"
 install -Dm755 "$SCRIPT_DIR/opt/leigod/fake_ps" "$BASE/fake_ps"
 install -Dm755 "$SCRIPT_DIR/opt/leigod/leigod_cleanup_net.sh" "$BASE/leigod_cleanup_net.sh"
-install -Dm755 "$SCRIPT_DIR/target/release/open-raijin" /usr/bin/leigod-webui
+install -Dm755 "$SCRIPT_DIR/target/release/leinux" /usr/bin/leigod-webui
 ln -sfn leigod-webui /usr/bin/lgd
 install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/index.html" "$BASE/webui/index.html"
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.open-raijin.svg" "$BASE/webui/io.github.asabalazy.open-raijin.svg"
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.open-raijin-symbolic.svg" "$BASE/webui/io.github.asabalazy.open-raijin-symbolic.svg"
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.open-raijin.svg" /usr/share/icons/hicolor/scalable/apps/io.github.asabalazy.open-raijin.svg
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.open-raijin-symbolic.svg" /usr/share/icons/hicolor/symbolic/apps/io.github.asabalazy.open-raijin-symbolic.svg
+install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.leinux.svg" "$BASE/webui/io.github.asabalazy.leinux.svg"
+install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.leinux-symbolic.svg" "$BASE/webui/io.github.asabalazy.leinux-symbolic.svg"
+install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.leinux.svg" /usr/share/icons/hicolor/scalable/apps/io.github.asabalazy.leinux.svg
+install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.leinux-symbolic.svg" /usr/share/icons/hicolor/symbolic/apps/io.github.asabalazy.leinux-symbolic.svg
 install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/leigod-webui.desktop" /usr/share/applications/leigod-webui.desktop
 [ -f /etc/default/leigod-webui ] || install -Dm644 "$SCRIPT_DIR/etc/default/leigod-webui" /etc/default/leigod-webui
 install -Dm644 "$SCRIPT_DIR/polkit/50-leigod-plugin.rules" /usr/share/polkit-1/rules.d/50-leigod-plugin.rules
@@ -74,4 +74,4 @@ install -Dm644 "$SCRIPT_DIR/systemd/leigod_webui.service" /etc/systemd/system/le
 systemctl daemon-reload
 systemctl enable --now leigod_plugin.service leigod_webui.service
 
-echo "[INFO] open-Raijin 安装完成！可在终端输入 'lgd' 打开原生 GTK4 控制面板或查看 'lgd --help'。"
+echo "[INFO] Leinux 安装完成！可在终端输入 'lgd' 打开原生 GTK4 控制面板或查看 'lgd --help'。"
