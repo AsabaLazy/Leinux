@@ -1,0 +1,60 @@
+[Unit]
+Description=Leigod Accelerator Core Service
+Wants=network-online.target
+After=network.target network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/leigod
+ExecStart=/opt/leigod/steamdeck_acc_monitor.sh
+ExecStopPost=-/opt/leigod/leigod_cleanup_net.sh
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=3
+
+StateDirectory=leigod
+StateDirectoryMode=0700
+PrivateTmp=true
+UMask=0077
+
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+
+ProtectSystem=strict
+ReadWritePaths=/opt/leigod/config
+ProtectHome=read-only
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+PrivateMounts=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=~@reboot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+InaccessiblePaths=-/run/dbus
+InaccessiblePaths=-/run/systemd/private
+InaccessiblePaths=-/usr/bin/systemctl
+InaccessiblePaths=-/usr/bin/reboot
+InaccessiblePaths=-/usr/sbin/reboot
+InaccessiblePaths=-/usr/bin/shutdown
+InaccessiblePaths=-/usr/bin/poweroff
+
+BindReadOnlyPaths=/opt/leigod/fake_product_name:/sys/class/dmi/id/product_name
+BindReadOnlyPaths=/opt/leigod/fake_os-release:/etc/os-release
+BindReadOnlyPaths=/opt/leigod/fake_ps:/usr/bin/ps
+BindReadOnlyPaths=/opt/leigod/fake_hosts:/etc/hosts
+
+[Install]
+WantedBy=multi-user.target

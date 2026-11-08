@@ -1,0 +1,11 @@
+#!/bin/sh
+# BusyBox-compatible `ps` wrapper for acc-gw.router.amd64 inside leigod_plugin.service.
+printf '  PID TTY      STAT   TIME COMMAND\n'
+pgrep -a -f '/opt/leigod/' 2>/dev/null | while read -r pid cmd; do
+    case "$cmd" in
+        *fake_ps*|*pgrep*) continue ;;
+    esac
+    printf '%5s ?        S      0:00 %s\n' "$pid" "$cmd"
+done
+printf '99998 ?        S      0:00 /bin/sh /opt/leigod/steamdeck_acc_monitor.sh\n'
+printf '99999 ?        S      0:00 /opt/leigod/acc_upgrade_monitor\n'
