@@ -14,7 +14,7 @@ use std::time::Duration;
 
 pub const CONF_FILE: &str = "/etc/default/leigod-webui";
 pub const SERVICES: [&str; 2] = ["leigod_plugin.service", "leigod_webui.service"];
-pub const VALID_AREAS: [&str; 10] = ["auto", "hk", "jp", "kr", "tw", "sea", "us", "eu", "ru", "au"];
+pub const VALID_AREAS: [&str; 9] = ["hk", "jp", "kr", "tw", "sea", "us", "eu", "ru", "au"];
 
 pub fn load_host_port() -> (String, u16) {
     let mut host = env::var("LEIGOD_WEBUI_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -101,7 +101,7 @@ Leinux — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
 
 选项:
   (无参数)             自动拉起后台服务并打开原生 GTK4 控制面板窗口
-  --start [AREA]       免开界面直接恢复时长并启动加速 (默认: auto)
+  --start [AREA]       免开界面直接恢复时长并启动加速 (默认: hk)
                        可选区服: {}
   --pause              仅断开加速隧道并暂停官网账号时长 (保持后台服务运行)
   --stop               暂停官网账号时长并停止后台服务
@@ -352,7 +352,7 @@ fn main() {
             daemon::run_daemon();
         }
         Some("--start") => {
-            let area = args.get(1).map(|s| s.as_str()).unwrap_or("auto");
+            let area = args.get(1).map(|s| s.as_str()).unwrap_or("hk");
             process::exit(cmd_start(area));
         }
         Some("--pause") => {

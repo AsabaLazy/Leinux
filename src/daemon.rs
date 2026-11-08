@@ -18,7 +18,7 @@ const LEIGOD_DIR: &str = "/opt/leigod";
 const WEBAPI_BASE: &str = "https://webapi.leigod.com";
 const FALLBACK_SIGN: &str = "6aedef9ce4b01aa456e120f2";
 
-const PRESET_AREAS: [&str; 10] = ["auto", "hk", "jp", "kr", "tw", "sea", "us", "eu", "ru", "au"];
+const PRESET_AREAS: [&str; 9] = ["hk", "jp", "kr", "tw", "sea", "us", "eu", "ru", "au"];
 
 const BYPASS_DNS_KEYWORDS: [&str; 9] = [
     "google", "gstatic", "youtube", "1e100", "ggpht", "anthropic", "claude", "openai", "github",
@@ -77,7 +77,6 @@ fn account_file() -> PathBuf {
 
 pub fn format_region_title(area: &str) -> String {
     match area.to_lowercase().as_str() {
-        "auto" | "global" => "全球智能分流".to_string(),
         "hk" => "中国香港".to_string(),
         "jp" => "日本东京".to_string(),
         "kr" => "韩国首尔".to_string(),
@@ -486,15 +485,7 @@ fn filter_live_nodes_in_conf(mut conf_obj: Value) -> Value {
         }
     }
     if let Some(geo_obj) = srv.get("geo").and_then(|v| v.as_object()) {
-        if area == "auto" {
-            for gv in geo_obj.values().filter_map(|v| v.as_array()) {
-                for u in gv.iter().filter_map(|x| x.as_str()) {
-                    if !u.is_empty() && u != "direct" {
-                        candidate_uris.insert(u.to_string());
-                    }
-                }
-            }
-        } else if let Some(gv) = geo_obj.get(&area).and_then(|v| v.as_array()) {
+        if let Some(gv) = geo_obj.get(&area).and_then(|v| v.as_array()) {
             for u in gv.iter().filter_map(|x| x.as_str()) {
                 if !u.is_empty() && u != "direct" {
                     candidate_uris.insert(u.to_string());
@@ -659,13 +650,8 @@ fn sanitize_acc_conf(conf_input: &Value) -> (String, Value, bool) {
     }
 
     if let Some(game_cfg) = parsed.get_mut("game").and_then(|v| v.as_object_mut()) {
-        let is_auto = game_cfg
-            .get("area")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .eq_ignore_ascii_case("auto");
-        if game_cfg.get("dyn_line") != Some(&Value::Bool(is_auto)) {
-            game_cfg.insert("dyn_line".to_string(), Value::Bool(is_auto));
+        if game_cfg.get("dyn_line") != Some(&Value::Bool(false)) {
+            game_cfg.insert("dyn_line".to_string(), Value::Bool(false));
             modified = true;
         }
     }
@@ -691,7 +677,7 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
 
     for p in profiles {
         let area = p["area"].as_str().unwrap_or("").trim().to_lowercase();
-        if area.is_empty() || area == "-" {
+        if area.is_empty() || area == "-" || area == "auto" || area == "global" {
             changed = true;
             continue;
         }
@@ -715,26 +701,24 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
             }
         }
 
-        if area != "auto" {
-            let area_nodes = nodes_by_area.entry(area.clone()).or_default();
-            if let Some(all_nodes) = conf_obj["server"]["allNode"].as_array() {
-                for n in all_nodes {
-                    let Some(uri) = n["node"].as_str() else { continue };
-                    let sign = n["speed_sign"].as_str().unwrap_or(FALLBACK_SIGN);
-                    let replace = match area_nodes.get(uri) {
-                        None => true,
-                        Some(old_n) => old_n["speed_sign"].as_str() == Some(FALLBACK_SIGN) && sign != FALLBACK_SIGN,
-                    };
-                    if replace {
-                        area_nodes.insert(
-                            uri.to_string(),
-                            json!({
-                                "node": uri,
-                                "ping": n["ping"].as_i64().unwrap_or(20),
-                                "speed_sign": sign,
-                            }),
-                        );
-                    }
+        let area_nodes = nodes_by_area.entry(area.clone()).or_default();
+        if let Some(all_nodes) = conf_obj["server"]["allNode"].as_array() {
+            for n in all_nodes {
+                let Some(uri) = n["node"].as_str() else { continue };
+                let sign = n["speed_sign"].as_str().unwrap_or(FALLBACK_SIGN);
+                let replace = match area_nodes.get(uri) {
+                    None => true,
+                    Some(old_n) => old_n["speed_sign"].as_str() == Some(FALLBACK_SIGN) && sign != FALLBACK_SIGN,
+                };
+                if replace {
+                    area_nodes.insert(
+                        uri.to_string(),
+                        json!({
+                            "node": uri,
+                            "ping": n["ping"].as_i64().unwrap_or(20),
+                            "speed_sign": sign,
+                        }),
+                    );
                 }
             }
         }
@@ -846,40 +830,6 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
                     }
                 }
             }
-
-            let mut auto_conf = parsed_by_area.get("hk").cloned().unwrap_or(base_conf);
-            auto_conf["game"]["area"] = json!("auto");
-            auto_conf["game"]["dyn_line"] = Value::Bool(true);
-            auto_conf["server"]["geo"] = merged_geo_val;
-            let (auto_str, _, _) = sanitize_acc_conf(&auto_conf);
-            let geo_node_total: usize = merged_geo
-                .iter()
-                .filter(|(k, v)| !k.is_empty() && **v != json!(["direct"]))
-                .map(|(_, v)| v.as_array().map(|a| a.len()).unwrap_or(0))
-                .sum();
-
-            let need_auto = match by_area.get("auto") {
-                None => true,
-                Some(a) => {
-                    a["conf"].as_str() != Some(&auto_str)
-                        || a["nodeCount"].as_u64() != Some(geo_node_total as u64)
-                }
-            };
-            if need_auto {
-                by_area.insert(
-                    "auto".to_string(),
-                    make_profile(
-                        "auto",
-                        &auto_str,
-                        geo_node_total,
-                        base_entry["catalog"].as_i64().unwrap_or(2),
-                        base_entry["subCatalog"].as_i64().unwrap_or(0),
-                        base_entry["gameId"].as_str().unwrap_or(""),
-                        &now_ts,
-                    ),
-                );
-                changed = true;
-            }
         }
     }
 
@@ -928,7 +878,7 @@ fn harvest_webapi_log_profiles(candidate_dirs: &[PathBuf]) -> Vec<Value> {
                     }
                     let (clean_str, parsed, _) = sanitize_acc_conf(conf_raw);
                     let area = parsed["game"]["area"].as_str().unwrap_or("").trim().to_lowercase();
-                    if area.is_empty() || area == "-" {
+                    if area.is_empty() || area == "-" || area == "auto" || area == "global" {
                         continue;
                     }
                     let node_count = parsed["server"]["allNode"].as_array().map(|a| a.len()).unwrap_or(0);
