@@ -289,32 +289,112 @@ fn flush_dns_cache() {
     let _ = Command::new("resolvectl").arg("flush-caches").output();
 }
 
+fn probe_dns_real_ip(server_ip: &str) -> bool {
+    let Ok(addr) = format!("{server_ip}:53").parse::<SocketAddr>() else {
+        return false;
+    };
+    let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else {
+        return false;
+    };
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(400)));
+    let _ = sock.set_write_timeout(Some(Duration::from_millis(400)));
+    // Query A record for api.steampowered.com
+    let query: &[u8] = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\
+\x03api\x0csteampowered\x03com\x00\x00\x01\x00\x01";
+    if sock.send_to(query, addr).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 512];
+    let Ok((n, _)) = sock.recv_from(&mut buf) else {
+        return false;
+    };
+    if n < 16 || (buf[3] & 0x0f) != 0 {
+        return false;
+    }
+    let ip = &buf[n - 4..n];
+    // Reject RFC 2544 Fake-IP (198.18.0.0/15), loopback, and unspecified
+    !(ip[0] == 198 && (ip[1] == 18 || ip[1] == 19)) && ip[0] != 0 && ip[0] != 127
+}
+
+fn find_ipv6_router_ipv4() -> Option<String> {
+    let v6_out = Command::new("ip").args(["-6", "neigh", "show"]).output().ok()?;
+    let v6_str = String::from_utf8_lossy(&v6_out.stdout);
+    let mut router_macs = BTreeSet::new();
+    for line in v6_str.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.contains(&"router") {
+            if let Some(idx) = parts.iter().position(|&x| x == "lladdr") {
+                if let Some(mac) = parts.get(idx + 1) {
+                    router_macs.insert(mac.to_lowercase());
+                }
+            }
+        }
+    }
+    if router_macs.is_empty() {
+        return None;
+    }
+    let v4_out = Command::new("ip").args(["-4", "neigh", "show"]).output().ok()?;
+    let v4_str = String::from_utf8_lossy(&v4_out.stdout);
+    for line in v4_str.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(idx) = parts.iter().position(|&x| x == "lladdr") {
+            if let Some(mac) = parts.get(idx + 1) {
+                if router_macs.contains(&mac.to_lowercase()) {
+                    if let Some(ip) = parts.first() {
+                        return Some((*ip).to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn detect_gateway_ip() -> String {
     if let Ok(guard) = cache().lock() {
         if let Some(ts) = guard.gw_ts {
-            if ts.elapsed() < Duration::from_secs(15) && !guard.gw_ip.is_empty() {
+            if ts.elapsed() < Duration::from_secs(30) && !guard.gw_ip.is_empty() {
                 return guard.gw_ip.clone();
             }
         }
     }
-    let mut gw = String::new();
+    let mut default_gw = String::new();
     if let Ok(out) = Command::new("ip").args(["route", "show", "default"]).output() {
         let s = String::from_utf8_lossy(&out.stdout);
         let parts: Vec<&str> = s.split_whitespace().collect();
         if let Some(idx) = parts.iter().position(|&x| x == "via") {
             if let Some(ip) = parts.get(idx + 1) {
-                gw = (*ip).to_string();
+                default_gw = (*ip).to_string();
             }
         }
     }
+
+    let mut chosen = default_gw.clone();
+    if let Some(v4_router) = find_ipv6_router_ipv4() {
+        if v4_router != default_gw && probe_dns_real_ip(&v4_router) {
+            chosen = v4_router;
+        }
+    }
+    if chosen == default_gw && !default_gw.is_empty() && !probe_dns_real_ip(&default_gw) {
+        if let Some((prefix, _)) = default_gw.rsplit_once('.') {
+            for suffix in ["1", "254"] {
+                let cand = format!("{prefix}.{suffix}");
+                if cand != default_gw && probe_dns_real_ip(&cand) {
+                    chosen = cand;
+                    break;
+                }
+            }
+        }
+    }
+
     if let Ok(mut guard) = cache().lock() {
         guard.gw_ts = Some(Instant::now());
-        if !gw.is_empty() {
-            guard.gw_ip = gw.clone();
+        if !chosen.is_empty() {
+            guard.gw_ip = chosen.clone();
         }
         return guard.gw_ip.clone();
     }
-    gw
+    chosen
 }
 
 fn resolve_local_dns_list() -> Vec<String> {
@@ -339,8 +419,8 @@ fn resolve_local_dns_list() -> Vec<String> {
             dns_list.push(format!("{gw}:53"));
         }
     }
-    for fb in ["223.5.5.5:53", "114.114.114.114:53"] {
-        if !dns_list.iter().any(|x| x == fb) {
+    if dns_list.is_empty() {
+        for fb in ["223.5.5.5:53", "114.114.114.114:53"] {
             dns_list.push(fb.to_string());
         }
     }
@@ -366,8 +446,10 @@ pub fn install_mangle_guard() {
         &["-t", "mangle", "-A", "LEIGOD_GUARD", "-m", "owner", "--uid-owner", "0", "-j", "ACCEPT"],
         &["-t", "mangle", "-A", "LEIGOD_GUARD", "-d", "10.0.0.0/8", "-p", "tcp", "-j", "ACCEPT"],
         &["-t", "mangle", "-A", "LEIGOD_GUARD", "-d", "10.0.0.0/8", "-p", "udp", "!", "--dport", "53", "-j", "ACCEPT"],
-        &["-t", "mangle", "-A", "LEIGOD_GUARD", "-d", "172.16.0.0/12", "-j", "ACCEPT"],
-        &["-t", "mangle", "-A", "LEIGOD_GUARD", "-d", "192.168.0.0/16", "-j", "ACCEPT"],
+        &["-t", "mangle", "-A", "LEIGOD_GUARD", "-d", "172.16.0.0/12", "-p", "tcp", "-j", "ACCEPT"],
+        &["-t", "mangle", "-A", "LEIGOD_GUARD", "-d", "172.16.0.0/12", "-p", "udp", "!", "--dport", "53", "-j", "ACCEPT"],
+        &["-t", "mangle", "-A", "LEIGOD_GUARD", "-d", "192.168.0.0/16", "-p", "tcp", "-j", "ACCEPT"],
+        &["-t", "mangle", "-A", "LEIGOD_GUARD", "-d", "192.168.0.0/16", "-p", "udp", "!", "--dport", "53", "-j", "ACCEPT"],
         &["-t", "mangle", "-A", "LEIGOD_GUARD", "-d", "198.18.0.0/15", "-j", "ACCEPT"],
     ];
     for r in base_rules {
