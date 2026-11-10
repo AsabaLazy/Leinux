@@ -15,7 +15,7 @@
 ### Arch Linux
 
 ```bash
-paru -S leigod-plugin-bin
+paru -S leinux-bin
 ```
 
 ### 通用 Linux (Debian / Ubuntu / Fedora / Arch / openSUSE)
