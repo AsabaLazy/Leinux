@@ -3,7 +3,7 @@ use crate::login::{find_chromium_binary, run_browser_login_popup};
 use crate::types::{AccountSnapshot, DaemonSnapshot, ProfileSummary, CONTINENT_ORDER};
 use adw::prelude::*;
 use gtk4 as gtk;
-use gtk4::{gdk, glib, pango};
+use gtk4::{gdk, gio, glib, pango};
 use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -214,7 +214,6 @@ struct MainWidgets {
     status_title: gtk::Label,
     status_sub: gtk::Label,
     main_btn: gtk::Button,
-    settings_btn: gtk::Button,
     region_row: adw::ActionRow,
     region_val: gtk::Label,
     delay_val: gtk::Label,
@@ -249,7 +248,7 @@ struct PrefsWidgets {
 #[derive(Clone)]
 struct RegionPicker {
     dialog: adw::Dialog,
-    filter_bar: gtk::Box,
+    filter_group: adw::ToggleGroup,
     list_box: gtk::Box,
     toasts: ToastDeck,
 }
@@ -494,19 +493,26 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
         .default_height(760)
         .build();
 
-    let window_title = adw::WindowTitle::new("Leinux", "正在连接服务…");
-    let settings_btn = gtk::Button::from_icon_name("emblem-system-symbolic");
-    settings_btn.set_tooltip_text(Some("设置"));
+    let window_title = adw::WindowTitle::new("Leinux", "");
+    let menu = gio::Menu::new();
+    menu.append(Some("首选项"), Some("app.preferences"));
+    menu.append(Some("关于 Leinux"), Some("app.about"));
+    let menu_btn = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .primary(true)
+        .tooltip_text("主菜单")
+        .build();
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&window_title));
-    header.pack_end(&settings_btn);
+    header.pack_end(&menu_btn);
 
     let status_icon = gtk::Image::from_icon_name("io.github.asabalazy.leinux-symbolic");
     status_icon.set_pixel_size(88);
     status_icon.add_css_class("dim-label");
     let status_title = gtk::Label::new(Some("未加速"));
     status_title.add_css_class("title-1");
-    let status_sub = gtk::Label::new(Some("非官方的雷神加速器Linux客户端"));
+    let status_sub = gtk::Label::new(Some("非官方的雷神加速器 Linux 客户端"));
     status_sub.add_css_class("dim-label");
 
     let main_btn = gtk::Button::with_label("启动加速");
@@ -516,7 +522,7 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
 
     let hero = gtk::Box::new(gtk::Orientation::Vertical, 8);
     hero.set_halign(gtk::Align::Center);
-    hero.set_margin_top(24);
+    hero.set_margin_top(16);
     hero.set_margin_bottom(8);
     for w in [status_icon.upcast_ref::<gtk::Widget>(), status_title.upcast_ref(), status_sub.upcast_ref(), main_btn.upcast_ref()] {
         hero.append(w);
@@ -532,6 +538,7 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
 
     let speed_history = Rc::new(RefCell::new(VecDeque::with_capacity(SPARK_POINTS)));
     let spark = sparkline(speed_history.clone());
+    spark.set_visible(false);
 
     let (delay_row, delay_val) = value_row("节点延迟");
     let (loss_row, loss_val) = value_row("丢包率");
@@ -549,8 +556,9 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
     acct_group.add(&acct_row);
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 24);
-    column.set_margin_start(12);
-    column.set_margin_end(12);
+    column.set_margin_top(8);
+    column.set_margin_start(24);
+    column.set_margin_end(24);
     column.set_margin_bottom(24);
     column.append(&hero);
     column.append(&region_group);
@@ -576,7 +584,6 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
         status_title,
         status_sub,
         main_btn,
-        settings_btn,
         region_row,
         region_val,
         delay_val,
@@ -676,19 +683,19 @@ fn build_prefs_dialog() -> PrefsWidgets {
 }
 
 fn build_region_picker() -> RegionPicker {
-    let filter_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    filter_bar.add_css_class("linked");
-    filter_bar.set_halign(gtk::Align::Center);
-    filter_bar.set_margin_top(6);
-    filter_bar.set_margin_bottom(8);
-    filter_bar.set_margin_start(12);
-    filter_bar.set_margin_end(12);
+    let filter_group = adw::ToggleGroup::new();
+    filter_group.add_css_class("round");
+    filter_group.set_halign(gtk::Align::Center);
+    filter_group.set_margin_top(6);
+    filter_group.set_margin_bottom(10);
+    filter_group.set_margin_start(18);
+    filter_group.set_margin_end(18);
 
     let list_box = gtk::Box::new(gtk::Orientation::Vertical, 18);
     list_box.set_margin_top(6);
-    list_box.set_margin_bottom(18);
-    list_box.set_margin_start(12);
-    list_box.set_margin_end(12);
+    list_box.set_margin_bottom(24);
+    list_box.set_margin_start(18);
+    list_box.set_margin_end(18);
 
     let clamp = adw::Clamp::builder().maximum_size(500).child(&list_box).build();
     let scroller = gtk::ScrolledWindow::builder()
@@ -697,7 +704,7 @@ fn build_region_picker() -> RegionPicker {
         .child(&clamp)
         .build();
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    vbox.append(&filter_bar);
+    vbox.append(&filter_group);
     vbox.append(&scroller);
     let view = adw::ToolbarView::new();
     view.add_top_bar(&adw::HeaderBar::new());
@@ -711,7 +718,7 @@ fn build_region_picker() -> RegionPicker {
         .child(&toasts.overlay)
         .build();
 
-    RegionPicker { dialog, filter_bar, list_box, toasts }
+    RegionPicker { dialog, filter_group, list_box, toasts }
 }
 
 impl MainWidgets {
@@ -739,32 +746,44 @@ impl MainWidgets {
         } else {
             self.status_icon.set_css_classes(&["dim-label"]);
             self.status_title.set_text(if st.snap.service_active { "未加速" } else { "服务未运行" });
-            self.status_sub.set_text("非官方的雷神加速器Linux客户端");
+            self.status_sub.set_text("非官方的雷神加速器 Linux 客户端");
             self.main_btn.set_label("启动加速");
             self.main_btn.set_css_classes(&["pill", "suggested-action"]);
         }
     }
 
     fn update_traffic(&self, st: &mut GuiState, snap: &DaemonSnapshot) {
-        let now = Instant::now();
-        if let Some((prx, ptx, pts)) = st.last_sample {
-            let dt = now.duration_since(pts).as_secs_f64();
-            if dt > 0.1 {
-                let rx = snap.rx_bytes.saturating_sub(prx) as f64 / dt;
-                let tx = snap.tx_bytes.saturating_sub(ptx) as f64 / dt;
-                self.speed_val.set_text(&format!("↓ {}/s  ↑ {}/s", format_bytes(rx, 0), format_bytes(tx, 0)));
-                let mut h = self.speed_history.borrow_mut();
-                if h.len() >= SPARK_POINTS {
-                    h.pop_front();
+        if snap.is_accelerating {
+            self.spark.set_visible(true);
+            let now = Instant::now();
+            if let Some((prx, ptx, pts)) = st.last_sample {
+                let dt = now.duration_since(pts).as_secs_f64();
+                if dt > 0.1 {
+                    let rx = snap.rx_bytes.saturating_sub(prx) as f64 / dt;
+                    let tx = snap.tx_bytes.saturating_sub(ptx) as f64 / dt;
+                    self.speed_val.set_text(&format!("↓ {}/s  ↑ {}/s", format_bytes(rx, 0), format_bytes(tx, 0)));
+                    let mut h = self.speed_history.borrow_mut();
+                    if h.len() >= SPARK_POINTS {
+                        h.pop_front();
+                    }
+                    h.push_back(rx + tx);
+                    drop(h);
+                    self.spark.queue_draw();
                 }
-                h.push_back(rx + tx);
-                drop(h);
-                self.spark.queue_draw();
             }
+            st.last_sample = Some((snap.rx_bytes, snap.tx_bytes, now));
+        } else {
+            self.spark.set_visible(false);
+            self.speed_history.borrow_mut().clear();
+            st.last_sample = None;
+            self.speed_val.set_text("—");
         }
-        st.last_sample = Some((snap.rx_bytes, snap.tx_bytes, now));
         self.total_val.set_text(&format_bytes((snap.rx_bytes + snap.tx_bytes) as f64, 1));
-        self.iface_val.set_text(&format!("{} · {}", snap.traffic_iface, snap.udp_6066));
+        if snap.traffic_iface.is_empty() {
+            self.iface_val.set_text(&snap.udp_6066);
+        } else {
+            self.iface_val.set_text(&format!("{} · {}", snap.traffic_iface, snap.udp_6066));
+        }
     }
 
     fn sync_token_entry(pw: &PrefsWidgets, hint: &str, expired: bool) {
@@ -827,7 +846,7 @@ impl MainWidgets {
         }
 
         self.window_title.set_subtitle(&if snap.service_active {
-            format!("服务运行中 · v{}", snap.version)
+            String::new()
         } else {
             format!("服务异常（{}）", snap.service_state)
         });
@@ -886,6 +905,28 @@ impl UiCtx {
         self.pw.dialog.present(Some(&self.mw.win));
     }
 
+    fn present_about(&self) {
+        let ver = {
+            let st = self.state.borrow();
+            if st.snap.version.is_empty() {
+                env!("CARGO_PKG_VERSION").to_string()
+            } else {
+                st.snap.version.clone()
+            }
+        };
+        let about = adw::AboutDialog::builder()
+            .application_name("Leinux")
+            .application_icon(APP_ID)
+            .developer_name("AsabaLazy")
+            .version(ver)
+            .comments("雷神加速器 Linux 原生 GTK4 客户端")
+            .website("https://github.com/AsabaLazy/Leinux")
+            .issue_url("https://github.com/AsabaLazy/Leinux/issues")
+            .license_type(gtk::License::MitX11)
+            .build();
+        about.present(Some(&self.mw.win));
+    }
+
     fn toast(&self, msg: &str) {
         if self.prefs_open.get() {
             self.pw.toasts.push(msg);
@@ -933,7 +974,6 @@ impl UiCtx {
     }
 
     fn rebuild_region_picker(&self) {
-        clear_box(&self.picker.filter_bar);
         let active_filter = {
             let mut st = self.state.borrow_mut();
             if !st.continent_filter.is_empty()
@@ -944,7 +984,7 @@ impl UiCtx {
             st.continent_filter.clone()
         };
 
-        let mut tabs = vec![("全部", "")];
+        let mut tabs = vec![("全部", "all")];
         {
             let st = self.state.borrow();
             tabs.extend(
@@ -956,25 +996,20 @@ impl UiCtx {
             );
         }
 
-        let mut first_btn: Option<gtk::ToggleButton> = None;
-        for (label, cont_val) in tabs {
-            let b = gtk::ToggleButton::with_label(label);
-            if let Some(ref f) = first_btn {
-                b.set_group(Some(f));
-            } else {
-                first_btn = Some(b.clone());
-            }
-            b.set_active(cont_val == active_filter);
-            let ctx = self.clone();
-            let cont_str = cont_val.to_string();
-            b.connect_toggled(move |btn| {
-                if btn.is_active() {
-                    ctx.state.borrow_mut().continent_filter = cont_str.clone();
-                    ctx.rebuild_region_list();
-                }
-            });
-            self.picker.filter_bar.append(&b);
+        self.suppress.set(true);
+        self.picker.filter_group.remove_all();
+        for (label, name) in tabs {
+            self.picker.filter_group.add(
+                adw::Toggle::builder()
+                    .name(name)
+                    .label(label)
+                    .build(),
+            );
         }
+        let active_name = if active_filter.is_empty() { "all" } else { active_filter.as_str() };
+        self.picker.filter_group.set_active_name(Some(active_name));
+        self.suppress.set(false);
+
         self.rebuild_region_list();
     }
 
@@ -1056,9 +1091,41 @@ impl UiCtx {
         }
     }
 
-    fn bind_signals(&self) {
+    fn bind_signals(&self, app: &adw::Application) {
+        let prefs_action = gio::SimpleAction::new("preferences", None);
+        {
+            let c = self.clone();
+            prefs_action.connect_activate(move |_, _| c.present_prefs());
+        }
+        app.add_action(&prefs_action);
+
+        let about_action = gio::SimpleAction::new("about", None);
+        {
+            let c = self.clone();
+            about_action.connect_activate(move |_, _| c.present_about());
+        }
+        app.add_action(&about_action);
+
+        let quit_action = gio::SimpleAction::new("quit", None);
+        {
+            let a = app.clone();
+            quit_action.connect_activate(move |_, _| a.quit());
+        }
+        app.add_action(&quit_action);
+
+        app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
+        app.set_accels_for_action("app.quit", &["<Primary>q"]);
+        app.set_accels_for_action("window.close", &["<Primary>w"]);
+
         let c = self.clone();
-        self.mw.settings_btn.connect_clicked(move |_| c.present_prefs());
+        self.picker.filter_group.connect_active_name_notify(move |grp| {
+            if c.suppress.get() {
+                return;
+            }
+            let name = grp.active_name().map(|s| s.to_string()).unwrap_or_default();
+            c.state.borrow_mut().continent_filter = if name == "all" { String::new() } else { name };
+            c.rebuild_region_list();
+        });
 
         let c = self.clone();
         self.pw.dialog.connect_closed(move |_| c.prefs_open.set(false));
@@ -1165,7 +1232,7 @@ fn build_ui(app: &adw::Application) {
         cmd_tx,
         evt_tx,
     };
-    ctx.bind_signals();
+    ctx.bind_signals(app);
 
     let loop_ctx = ctx.clone();
     glib::timeout_add_local(Duration::from_millis(250), move || {

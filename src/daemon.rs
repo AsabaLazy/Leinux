@@ -62,7 +62,7 @@ fn build_daemon_snapshot(known_rev: u64, include_account: bool) -> DaemonSnapsho
         let (rx, tx) = read_iface_bytes(first);
         (tuns.join(", "), first.clone(), rx, tx)
     } else {
-        ("未创建 (开启加速后生成)".to_string(), "tun_PC".to_string(), 0, 0)
+        ("未创建 (开启加速后生成)".to_string(), String::new(), 0, 0)
     };
 
     let ini = read_ini_values();
