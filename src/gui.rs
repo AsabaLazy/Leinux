@@ -73,7 +73,6 @@ struct GuiState {
     snap: DaemonSnapshot,
     profiles: Vec<ProfileSummary>,
     account: AccountSnapshot,
-    acct_name_visible: bool,
     selected_area: String,
     continent_filter: String,
     started_at: Option<Instant>,
@@ -293,12 +292,6 @@ fn format_bytes(bytes: f64, decimals: usize) -> String {
 
 fn format_hms(secs: u64) -> String {
     format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-}
-
-fn format_acct_subtitle(acct: &AccountSnapshot, name_visible: bool) -> String {
-    let state = if acct.paused { "已暂停" } else { "计时中" };
-    let who = if name_visible { acct.sub_text.as_str() } else { "••••••••" };
-    format!("{state} · {who}")
 }
 
 fn value_row(title: &str) -> (adw::ActionRow, gtk::Label) {
@@ -794,12 +787,10 @@ impl MainWidgets {
         }
     }
 
-    fn update_account_section(&self, pw: &PrefsWidgets, acct: &AccountSnapshot, name_visible: bool) {
+    fn update_account_section(&self, pw: &PrefsWidgets, acct: &AccountSnapshot) {
         if acct.configured && acct.valid {
-            self.acct_row.set_activatable(true);
-            self.acct_row.set_tooltip_text(Some("点击显示或隐藏账号名称"));
             self.acct_row.set_title(&format!("{} 小时 {} 分", acct.hours, acct.mins));
-            self.acct_row.set_subtitle(&format_acct_subtitle(acct, name_visible));
+            self.acct_row.set_subtitle(if acct.paused { "时长已暂停" } else { "时长计时中" });
             self.acct_btn.set_label(if acct.paused { "恢复时长" } else { "暂停时长" });
 
             pw.login_row.set_subtitle(&format!("当前已绑定：{} · 可重新登录切换账号", acct.sub_text));
@@ -807,8 +798,6 @@ impl MainWidgets {
             pw.login_btn.remove_css_class("suggested-action");
             Self::sync_token_entry(pw, &acct.token_hint, false);
         } else if acct.configured {
-            self.acct_row.set_activatable(false);
-            self.acct_row.set_tooltip_text(None);
             self.acct_row.set_title("账号凭证已失效");
             self.acct_row.set_subtitle("点击右侧重新打开登录窗，自动刷新凭证与绑定");
             self.acct_btn.set_label("重新登录");
@@ -818,8 +807,6 @@ impl MainWidgets {
             pw.login_btn.add_css_class("suggested-action");
             Self::sync_token_entry(pw, &acct.token_hint, true);
         } else {
-            self.acct_row.set_activatable(false);
-            self.acct_row.set_tooltip_text(None);
             self.acct_row.set_title("未登录雷神账号");
             self.acct_row.set_subtitle("点击右侧一键弹出登录小窗口，自动完成绑定与同步");
             self.acct_btn.set_label("登录账号");
@@ -871,7 +858,7 @@ impl MainWidgets {
             self.loss_val.set_text("—");
         }
 
-        self.update_account_section(pw, &st.account, st.acct_name_visible);
+        self.update_account_section(pw, &st.account);
         pw.auto_pause_row.set_active(st.account.auto_pause_on_stop);
         let gw_dns = if st.account.detected_gateway_dns.is_empty() {
             "223.5.5.5:53"
@@ -1084,16 +1071,6 @@ impl UiCtx {
 
         let c = self.clone();
         self.mw.main_btn.connect_clicked(move |_| c.on_main_clicked());
-
-        let c = self.clone();
-        self.mw.acct_row.connect_activated(move |row| {
-            let mut st = c.state.borrow_mut();
-            if !st.account.configured || !st.account.valid {
-                return;
-            }
-            st.acct_name_visible = !st.acct_name_visible;
-            row.set_subtitle(&format_acct_subtitle(&st.account, st.acct_name_visible));
-        });
 
         let c = self.clone();
         self.mw.acct_btn.connect_clicked(move |_| c.on_account_clicked());
