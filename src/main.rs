@@ -13,17 +13,19 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Command};
 use std::thread;
 use std::time::Duration;
 use types::{DaemonSnapshot, CONTINENT_ORDER};
 
-pub const CONF_FILE: &str = "/etc/default/leigod-webui";
-pub const SERVICES: [&str; 2] = ["leigod_plugin.service", "leigod_webui.service"];
+pub const CONF_FILE: &str = "/etc/default/leinux";
+pub const CORE_SERVICE: &str = "leinux-core.service";
+pub const DAEMON_SERVICE: &str = "leinux.service";
+pub const SERVICES: [&str; 2] = [CORE_SERVICE, DAEMON_SERVICE];
 
 pub fn load_host_port() -> (String, u16) {
-    let mut host = env::var("LEIGOD_WEBUI_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let mut port = env::var("LEIGOD_WEBUI_PORT")
+    let mut host = env::var("LEINUX_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let mut port = env::var("LEINUX_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(8088);
@@ -37,8 +39,8 @@ pub fn load_host_port() -> (String, u16) {
         {
             let val = v.trim().trim_matches(|c| c == '\'' || c == '"');
             match k.trim() {
-                "LEIGOD_WEBUI_HOST" if !val.is_empty() => host = val.to_string(),
-                "LEIGOD_WEBUI_PORT" => {
+                "LEINUX_HOST" if !val.is_empty() => host = val.to_string(),
+                "LEINUX_PORT" => {
                     if let Ok(p) = val.parse::<u16>() {
                         port = p;
                     }
@@ -100,7 +102,7 @@ pub fn ensure_services() {
 
 fn print_help() {
     println!(
-        "用法: lgd [选项]  (或 leigod-webui [选项])
+        "用法: lgd [选项]  (或 leinux [选项])
 
 Leinux — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
 
@@ -218,18 +220,18 @@ fn cmd_pause() -> i32 {
 }
 
 fn cmd_stop() -> i32 {
-    if service_active("leigod_webui.service") {
+    if service_active(DAEMON_SERVICE) {
         let _ = http_request("POST", "/api/account/pause", Some(&json!({})), 5000);
     }
     let _ = Command::new("systemctl")
-        .args(["stop", "leigod_webui.service", "leigod_plugin.service"])
+        .args(["stop", DAEMON_SERVICE, CORE_SERVICE])
         .status();
-    println!("已暂停账号时长并停止 leigod_webui.service 与 leigod_plugin.service");
+    println!("已暂停账号时长并停止 {DAEMON_SERVICE} 与 {CORE_SERVICE}");
     0
 }
 
 fn cmd_status() -> i32 {
-    if !service_active("leigod_webui.service") {
+    if !service_active(DAEMON_SERVICE) {
         println!("服务状态: 已停止 (可执行 'lgd' 或 'lgd --start hk' 启动)");
         return 0;
     }
@@ -258,7 +260,7 @@ fn cmd_status() -> i32 {
             let state_lbl = if acct.paused { "已暂停" } else { "计时中" };
             format!("{state_lbl} (剩余 {} 小时 {} 分)", acct.hours, acct.mins)
         }
-        _ => "未配置官网 Token".to_string(),
+        _ => "未登录雷神账号 (可执行 'lgd --login')".to_string(),
     };
 
     println!("服务状态: 运行中 (http://{host}:{port})");
@@ -281,13 +283,13 @@ fn cmd_port(port_str: &str) -> i32 {
     if let Some(parent) = Path::new(CONF_FILE).parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let content = format!("LEIGOD_WEBUI_HOST=127.0.0.1\nLEIGOD_WEBUI_PORT={port}\n");
+    let content = format!("LEINUX_HOST=127.0.0.1\nLEINUX_PORT={port}\n");
     if let Err(e) = fs::write(CONF_FILE, content) {
         eprintln!("错误: 写入 {CONF_FILE} 失败: {e}");
         return 1;
     }
     let _ = Command::new("systemctl")
-        .args(["restart", "leigod_webui.service"])
+        .args(["restart", DAEMON_SERVICE])
         .status();
     println!("已将守护服务端口更新为 {port} 并重启服务: http://127.0.0.1:{port}");
     0
@@ -311,7 +313,6 @@ fn main() {
             };
             process::exit(cmd_port(p));
         }
-        Some(other) if other.starts_with("--host") => daemon::run_daemon(),
         Some(other) => {
             eprintln!("未知选项: {other}\n");
             print_help();
@@ -322,13 +323,8 @@ fn main() {
             if env::var_os("DISPLAY").is_some() || env::var_os("WAYLAND_DISPLAY").is_some() {
                 gui::run_gui();
             } else {
-                let (host, port) = load_host_port();
-                let _ = Command::new("xdg-open")
-                    .arg(format!("http://{host}:{port}"))
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
-                println!("雷神服务已就绪: http://{host}:{port}");
+                let _ = cmd_status();
+                println!("当前无图形界面环境，可使用 'lgd --list' 或 'lgd --start <区服>' 进行管理。");
             }
         }
     }

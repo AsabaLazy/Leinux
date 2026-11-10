@@ -1,15 +1,15 @@
 [Unit]
 Description=Leinux Daemon Service
-After=network.target leigod_plugin.service
-Wants=leigod_plugin.service
+After=network.target leinux-core.service
+Wants=leinux-core.service
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/leigod
-Environment=LEIGOD_WEBUI_HOST=127.0.0.1
-Environment=LEIGOD_WEBUI_PORT=8088
-EnvironmentFile=-/etc/default/leigod-webui
-ExecStart=/usr/bin/leigod-webui --daemon
+Environment=LEINUX_HOST=127.0.0.1
+Environment=LEINUX_PORT=8088
+EnvironmentFile=-/etc/default/leinux
+ExecStart=/usr/bin/leinux --daemon
 Restart=on-failure
 RestartSec=3
 

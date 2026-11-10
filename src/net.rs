@@ -113,7 +113,7 @@ pub fn check_plugin_service() -> (bool, String) {
         return (true, "active".to_string());
     }
     match Command::new("systemctl")
-        .args(["is-active", "leigod_plugin.service"])
+        .args(["is-active", crate::CORE_SERVICE])
         .output()
     {
         Ok(out) => {

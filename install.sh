@@ -27,7 +27,13 @@ if [ ! -x "$SCRIPT_DIR/target/release/leinux" ]; then
     (cd "$SCRIPT_DIR" && cargo build --release)
 fi
 
-systemctl stop leigod_webui.service leigod_plugin.service 2>/dev/null || true
+systemctl stop leinux.service leinux-core.service leigod_webui.service leigod_plugin.service 2>/dev/null || true
+systemctl disable leigod_webui.service leigod_plugin.service 2>/dev/null || true
+rm -f /etc/systemd/system/leigod_webui.service \
+      /etc/systemd/system/leigod_plugin.service \
+      /usr/bin/leigod-webui \
+      /usr/share/applications/leigod-webui.desktop \
+      /usr/share/polkit-1/rules.d/50-leigod-plugin.rules
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' 0 HUP INT TERM
@@ -40,7 +46,7 @@ printf '%s  %s\n%s  %s\n' \
     "$BIN_SHA256" "$tmp_dir/acc-gw.router.amd64" \
     "$XDB_SHA256" "$tmp_dir/ipdatacloud_country.xdb" | sha256sum -c -
 
-install -dm755 "$BASE/config" "$BASE/webui"
+install -dm755 "$BASE/config"
 install -Dm755 "$tmp_dir/acc-gw.router.amd64" "$BASE/acc-gw.router.amd64"
 install -Dm755 "$tmp_dir/acc-gw.router.amd64" "$BASE/acc_upgrade_monitor"
 install -Dm644 "$tmp_dir/ipdatacloud_country.xdb" "$BASE/config/ipdatacloud_country.xdb"
@@ -48,16 +54,13 @@ install -Dm644 "$tmp_dir/ipdatacloud_country.xdb" "$BASE/config/ipdatacloud_coun
 install -Dm755 "$SCRIPT_DIR/opt/leigod/steamdeck_acc_monitor.sh" "$BASE/steamdeck_acc_monitor.sh"
 install -Dm755 "$SCRIPT_DIR/opt/leigod/fake_ps" "$BASE/fake_ps"
 install -Dm755 "$SCRIPT_DIR/opt/leigod/leigod_cleanup_net.sh" "$BASE/leigod_cleanup_net.sh"
-install -Dm755 "$SCRIPT_DIR/target/release/leinux" /usr/bin/leigod-webui
-ln -sfn leigod-webui /usr/bin/lgd
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/index.html" "$BASE/webui/index.html"
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.leinux.svg" "$BASE/webui/io.github.asabalazy.leinux.svg"
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.leinux-symbolic.svg" "$BASE/webui/io.github.asabalazy.leinux-symbolic.svg"
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.leinux.svg" /usr/share/icons/hicolor/scalable/apps/io.github.asabalazy.leinux.svg
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/io.github.asabalazy.leinux-symbolic.svg" /usr/share/icons/hicolor/symbolic/apps/io.github.asabalazy.leinux-symbolic.svg
-install -Dm644 "$SCRIPT_DIR/opt/leigod/webui/leigod-webui.desktop" /usr/share/applications/leigod-webui.desktop
-[ -f /etc/default/leigod-webui ] || install -Dm644 "$SCRIPT_DIR/etc/default/leigod-webui" /etc/default/leigod-webui
-install -Dm644 "$SCRIPT_DIR/polkit/50-leigod-plugin.rules" /usr/share/polkit-1/rules.d/50-leigod-plugin.rules
+install -Dm755 "$SCRIPT_DIR/target/release/leinux" /usr/bin/leinux
+ln -sfn leinux /usr/bin/lgd
+install -Dm644 "$SCRIPT_DIR/share/icons/io.github.asabalazy.leinux.svg" /usr/share/icons/hicolor/scalable/apps/io.github.asabalazy.leinux.svg
+install -Dm644 "$SCRIPT_DIR/share/icons/io.github.asabalazy.leinux-symbolic.svg" /usr/share/icons/hicolor/symbolic/apps/io.github.asabalazy.leinux-symbolic.svg
+install -Dm644 "$SCRIPT_DIR/share/io.github.asabalazy.leinux.desktop" /usr/share/applications/io.github.asabalazy.leinux.desktop
+[ -f /etc/default/leinux ] || install -Dm644 "$SCRIPT_DIR/etc/default/leinux" /etc/default/leinux
+install -Dm644 "$SCRIPT_DIR/polkit/50-leinux.rules" /usr/share/polkit-1/rules.d/50-leinux.rules
 
 install -Dm644 "$SCRIPT_DIR/opt/leigod/fake_os-release" "$BASE/fake_os-release"
 install -Dm644 "$SCRIPT_DIR/opt/leigod/fake_product_name" "$BASE/fake_product_name"
@@ -69,9 +72,9 @@ install -Dm644 "$SCRIPT_DIR/opt/leigod/config/new_upgrade_conf.json" "$BASE/conf
 chmod 0644 "$BASE/config/accelerator"
 
 ln -sfn "$BASE" /home/leigod
-install -Dm644 "$SCRIPT_DIR/systemd/leigod_plugin.service" /etc/systemd/system/leigod_plugin.service
-install -Dm644 "$SCRIPT_DIR/systemd/leigod_webui.service" /etc/systemd/system/leigod_webui.service
+install -Dm644 "$SCRIPT_DIR/systemd/leinux-core.service" /etc/systemd/system/leinux-core.service
+install -Dm644 "$SCRIPT_DIR/systemd/leinux.service" /etc/systemd/system/leinux.service
 systemctl daemon-reload
-systemctl enable --now leigod_plugin.service leigod_webui.service
+systemctl enable --now leinux-core.service leinux.service
 
-echo "[INFO] Leinux 安装完成！可在终端输入 'lgd' 打开原生 GTK4 控制面板或查看 'lgd --help'。"
+echo "[INFO] Leinux 安装完成！可在终端输入 'lgd' (或 'leinux') 打开原生 GTK4 控制面板或查看 'lgd --help'。"

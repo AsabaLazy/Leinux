@@ -206,7 +206,7 @@ pub fn query_active_acc_state(token: &str) -> (bool, String, i64, String) {
         return (false, String::new(), 0, "0".to_string());
     }
     let dev_req = json!({
-        "cmd": "GETDEVICELIST", "tag": "1", "sn": "", "cli": "webui",
+        "cmd": "GETDEVICELIST", "tag": "1", "sn": "", "cli": "leinux",
         "code": 0, "err": "", "data": {"token": token}
     });
     let Ok(dev_resp) = ws_rpc_call("127.0.0.1", 5588, "/ws", &dev_req, 1500) else {
@@ -231,7 +231,7 @@ pub fn query_active_acc_state(token: &str) -> (bool, String, i64, String) {
 
     let active_area = active["area"].as_str().unwrap_or("hk").to_lowercase();
     let info_req = json!({
-        "cmd": "GETACCINFO", "tag": "2", "sn": "", "cli": "webui",
+        "cmd": "GETACCINFO", "tag": "2", "sn": "", "cli": "leinux",
         "code": 0, "err": "", "data": {"token": token}
     });
     let mut net_delay = 0i64;
@@ -482,7 +482,7 @@ pub fn pause_account_time() -> Value {
                 "cmd": "STOPACC",
                 "tag": "pause-stop",
                 "sn": "",
-                "cli": "webui",
+                "cli": "leinux",
                 "code": 0,
                 "err": "",
                 "data": {"token": router_token, "catalogs": [2]},

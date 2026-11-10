@@ -76,13 +76,9 @@ pub struct ProfileSummary {
     pub catalog: i64,
     #[serde(rename = "subCatalog", default)]
     pub sub_catalog: i64,
-    #[serde(rename = "gameId", default)]
-    pub game_id: String,
     pub area: String,
     #[serde(rename = "nodeCount", default)]
     pub node_count: usize,
-    #[serde(rename = "updatedAt", default)]
-    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,16 +105,12 @@ pub struct AccountSnapshot {
 pub struct DaemonSnapshot {
     pub service_active: bool,
     pub service_state: String,
-    pub mac: String,
     pub tun_interface: String,
     pub traffic_iface: String,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
-    pub has_gameacc_chain: bool,
     pub udp_6066: String,
     pub version: String,
-    pub token: String,
-    pub user_id: String,
     pub is_accelerating: bool,
     pub active_area: String,
     #[serde(default)]

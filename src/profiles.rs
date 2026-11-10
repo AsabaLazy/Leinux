@@ -12,7 +12,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 struct ProfileCache {
     last_sig: Vec<(u64, u64)>,
@@ -39,13 +39,6 @@ fn profiles_file() -> PathBuf {
 
 fn cloud_geo_file() -> PathBuf {
     state_dir().join("cloud_geo.json")
-}
-
-fn now_timestamp_str() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_string())
 }
 
 fn file_sig(p: &Path) -> (u64, u64) {
@@ -139,8 +132,6 @@ fn make_stored_profile(
     node_count: usize,
     catalog: i64,
     sub_catalog: i64,
-    game_id: &str,
-    updated_at: &str,
 ) -> StoredProfile {
     let low = area.trim().to_lowercase();
     StoredProfile {
@@ -150,10 +141,8 @@ fn make_stored_profile(
             continent: format_region_continent(&low).to_string(),
             catalog,
             sub_catalog,
-            game_id: game_id.to_string(),
             area: low,
             node_count,
-            updated_at: if updated_at.is_empty() { now_timestamp_str() } else { updated_at.to_string() },
         },
         conf,
     }
@@ -340,8 +329,6 @@ pub fn consolidate_regional_profiles(
             nc,
             p.summary.catalog,
             p.summary.sub_catalog,
-            &p.summary.game_id,
-            &p.summary.updated_at,
         );
         if next.summary != p.summary || was_mod || by_area.contains_key(&area) {
             changed = true;
@@ -417,8 +404,6 @@ pub fn consolidate_regional_profiles(
                         node_list.len(),
                         base.summary.catalog,
                         base.summary.sub_catalog,
-                        &base.summary.game_id,
-                        &base.summary.updated_at,
                     ),
                 );
                 changed = true;
@@ -560,15 +545,7 @@ pub fn fetch_cloud_seed(rounds: usize) -> Option<(StoredProfile, BTreeMap<String
         }
     });
 
-    let seed = make_stored_profile(
-        "hk",
-        seed_conf,
-        hk_uris.len(),
-        2,
-        0,
-        "2c92a50b86b5ad730186b5b58f980003",
-        "",
-    );
+    let seed = make_stored_profile("hk", seed_conf, hk_uris.len(), 2, 0);
     Some((seed, merged_geo))
 }
 
@@ -588,7 +565,7 @@ fn capture_from_core_conf(
 
     for item in acc_list {
         let Some(obj) = item.as_object_mut() else { continue };
-        for (dev_key, dev_val) in obj.iter_mut() {
+        for (_dev_key, dev_val) in obj.iter_mut() {
             if dev_val.get("acc_conf").is_none() {
                 continue;
             }
@@ -614,12 +591,7 @@ fn capture_from_core_conf(
                 .or_else(|| dev_val["catalog_type"].as_i64())
                 .unwrap_or(2);
             let sub_cat = dev_val["sub_type"].as_i64().unwrap_or(0);
-            let game_id = parsed["game"]["id"]
-                .as_str()
-                .or_else(|| dev_val["server"].as_str())
-                .unwrap_or(dev_key)
-                .to_string();
-            let entry = make_stored_profile(&area, parsed, nc, catalog, sub_cat, &game_id, "");
+            let entry = make_stored_profile(&area, parsed, nc, catalog, sub_cat);
 
             if let Some(old) = profiles.iter_mut().find(|p| p.summary.id == entry.summary.id) {
                 if old.conf != entry.conf {

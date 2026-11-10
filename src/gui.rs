@@ -29,7 +29,7 @@ enum WorkerCmd {
     SaveCustomDns(String),
     RefreshNodes,
     RestartService,
-    RepairBound(String, String),
+    RepairBound,
     CleanupNet,
 }
 
@@ -249,13 +249,8 @@ fn handle_worker_cmd(cmd: WorkerCmd, evt_tx: &mpsc::Sender<WorkerEvent>, known_r
             toast("加速守护服务已重启".to_string());
             refresh_account = true;
         }
-        WorkerCmd::RepairBound(tok, uid) => {
-            let _ = http_request(
-                "POST",
-                "/api/ws-rpc",
-                Some(&json!({"cmd": "AUTOREPAIRBOUND", "tag": "repair", "sn": "", "cli": "webui", "code": 0, "err": "", "data": {"rToken": tok, "userId": uid}})),
-                6000,
-            );
+        WorkerCmd::RepairBound => {
+            let _ = http_request("POST", "/api/device/repair", Some(&json!({})), 6000);
             toast("已执行设备绑定修复".to_string());
             return;
         }
@@ -303,8 +298,6 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
         .default_width(460)
         .default_height(760)
         .build();
-    gtk::IconTheme::for_display(&gtk::prelude::WidgetExt::display(&win))
-        .add_search_path("/opt/leigod/webui");
 
     let window_title = adw::WindowTitle::new("Leinux", "正在连接服务…");
     let settings_btn = gtk::Button::from_icon_name("emblem-system-symbolic");
@@ -432,7 +425,8 @@ fn build_prefs_dialog() -> PrefsWidgets {
 
     let (refresh_nodes_row, refresh_nodes_btn) =
         button_row("同步云端节点", "直接从雷神云端动态拉取全部区服最新节点（免手机）", "同步");
-    let (restart_row, restart_btn) = button_row("重启守护服务", "重启 leigod_plugin 服务", "重启");
+    let (restart_row, restart_btn) =
+        button_row("重启守护服务", "重启 leinux-core 加速核心服务", "重启");
     let (repair_row, repair_btn) = button_row("修复设备绑定", "重新向雷神同步本机设备", "修复");
     let (cleanup_row, cleanup_btn) = button_row("清理防火墙规则", "移除残留的 iptables 规则", "清理");
     cleanup_btn.add_css_class("destructive-action");
@@ -905,10 +899,9 @@ fn build_ui(app: &adw::Application) {
         });
     }
     {
-        let (tx, st) = (cmd_tx.clone(), state.clone());
+        let tx = cmd_tx.clone();
         pw.repair_btn.connect_clicked(move |_| {
-            let cur = st.borrow();
-            let _ = tx.send(WorkerCmd::RepairBound(cur.snap.token.clone(), cur.snap.user_id.clone()));
+            let _ = tx.send(WorkerCmd::RepairBound);
         });
     }
     {

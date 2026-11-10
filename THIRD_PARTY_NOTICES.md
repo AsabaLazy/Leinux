@@ -1,7 +1,7 @@
 # Third-Party Notices
 
-The repository-level MIT license applies only to the original scripts, WebUI,
-CLI tools, and documentation in this repository.
+The repository-level MIT license applies only to the original scripts, GUI,
+daemon, CLI tools, and documentation in this repository.
 
 The following components are downloaded during installation/build from official
 Leigod servers and are **not** licensed under MIT:

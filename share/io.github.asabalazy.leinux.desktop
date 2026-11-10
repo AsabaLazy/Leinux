@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=Leinux
-Name[zh_CN]=Leinux (雷神加速控制台)
-Comment=Leinux control panel for Linux
-Exec=/usr/bin/leigod-webui
+Name[zh_CN]=Leinux (雷神加速器)
+Comment=Native GTK4 client for Leigod Accelerator on Linux
+Exec=/usr/bin/leinux
 Icon=io.github.asabalazy.leinux
 Terminal=false
 Type=Application

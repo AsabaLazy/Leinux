@@ -1,7 +1,7 @@
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.systemd1.manage-units" &&
-        (action.lookup("unit") == "leigod_plugin.service" ||
-         action.lookup("unit") == "leigod_webui.service") &&
+        (action.lookup("unit") == "leinux-core.service" ||
+         action.lookup("unit") == "leinux.service") &&
         subject.active && subject.local && subject.isInGroup("wheel")) {
         return polkit.Result.YES;
     }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# BusyBox-compatible `ps` wrapper for acc-gw.router.amd64 inside leigod_plugin.service.
+# BusyBox-compatible `ps` wrapper for acc-gw.router.amd64 inside leinux-core.service.
 printf '  PID TTY      STAT   TIME COMMAND\n'
 pgrep -a -f '/opt/leigod/' 2>/dev/null | while read -r pid cmd; do
     case "$cmd" in

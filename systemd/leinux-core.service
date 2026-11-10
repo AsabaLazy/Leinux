@@ -1,5 +1,5 @@
 [Unit]
-Description=Leigod Accelerator Core Service
+Description=Leinux Accelerator Core Service
 Wants=network-online.target
 After=network.target network-online.target
 StartLimitIntervalSec=60
