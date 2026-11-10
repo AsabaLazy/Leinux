@@ -644,7 +644,7 @@
 
     .maint-grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(2, 1fr);
       gap: 0.55rem;
     }
 
@@ -814,6 +814,7 @@
       <input id="token-input" type="hidden">
       <input id="userid-input" type="hidden">
       <div class="maint-grid">
+        <button class="btn-sm" onclick="refreshCloudNodes()">同步云端节点</button>
         <button class="btn-sm" onclick="restartPluginService()">重启守护服务</button>
         <button class="btn-sm" onclick="sendCmd('AUTOREPAIRBOUND', { rToken: getToken(), userId: getUserId() })">修复设备绑定</button>
         <button class="btn-sm btn-danger" onclick="cleanupNetRules()">清理防火墙规则</button>
@@ -1187,6 +1188,13 @@
       const snippet = 'copy(JSON.parse(localStorage.getItem("account_token")).account_token)';
       navigator.clipboard.writeText(snippet).catch(() => {});
       showToast('已复制 F12 提取命令到剪贴板');
+    }
+
+    async function refreshCloudNodes() {
+      showToast('正在从雷神云端同步最新节点池...');
+      const res = await apiPost('/api/profiles/refresh');
+      showToast(res.msg || (res.ok ? '已同步云端节点池' : '同步云端节点失败'));
+      await loadHostStatus();
     }
 
     async function cleanupNetRules() {

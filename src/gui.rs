@@ -60,6 +60,7 @@ enum WorkerCmd {
     SaveToken(String, bool),
     SaveAutoPause(bool),
     SaveCustomDns(String),
+    RefreshNodes,
     RestartService,
     RepairBound(String, String),
     CleanupNet,
@@ -436,12 +437,14 @@ fn build_ui(app: &adw::Application) {
     let net_prefs = adw::PreferencesGroup::builder().title("网络").build();
     net_prefs.add(&dns_row);
 
+    let (refresh_nodes_row, refresh_nodes_btn) =
+        button_row("同步云端节点", "直接从雷神云端拉取 9 大区服最新节点（免手机）", "同步");
     let (restart_row, restart_btn) = button_row("重启守护服务", "重启 leigod_plugin 服务", "重启");
     let (repair_row, repair_btn) = button_row("修复设备绑定", "重新向雷神同步本机设备", "修复");
     let (cleanup_row, cleanup_btn) = button_row("清理防火墙规则", "移除残留的 iptables 规则", "清理");
     cleanup_btn.add_css_class("destructive-action");
     let maint_prefs = adw::PreferencesGroup::builder().title("维护").build();
-    for row in [&restart_row, &repair_row, &cleanup_row] {
+    for row in [&refresh_nodes_row, &restart_row, &repair_row, &cleanup_row] {
         maint_prefs.add(row);
     }
 
@@ -579,6 +582,25 @@ fn build_ui(app: &adw::Application) {
                             format!("已保存自定义直连 DNS: {dns}")
                         }));
                         if let Some(s) = fetch_snapshot(true, last_snap.as_ref()) {
+                            let _ = evt_tx.send(WorkerEvent::Snapshot(s.clone()));
+                            last_snap = Some(s);
+                        }
+                    }
+                    WorkerCmd::RefreshNodes => {
+                        let _ = evt_tx.send(WorkerEvent::Toast("正在从雷神云端拉取最新节点池...".to_string()));
+                        match http_request("POST", "/api/profiles/refresh", Some(&json!({})), 10000) {
+                            Ok(res) if res["ok"].as_bool() == Some(true) => {
+                                let msg = res["msg"]
+                                    .as_str()
+                                    .unwrap_or("已同步雷神云端最新节点池")
+                                    .to_string();
+                                let _ = evt_tx.send(WorkerEvent::Toast(msg));
+                            }
+                            _ => {
+                                let _ = evt_tx.send(WorkerEvent::Toast("同步云端节点失败".to_string()));
+                            }
+                        }
+                        if let Some(s) = fetch_snapshot(false, last_snap.as_ref()) {
                             let _ = evt_tx.send(WorkerEvent::Snapshot(s.clone()));
                             last_snap = Some(s);
                         }
@@ -743,6 +765,12 @@ fn build_ui(app: &adw::Application) {
         let tx = cmd_tx.clone();
         dns_row.connect_apply(move |row| {
             let _ = tx.send(WorkerCmd::SaveCustomDns(row.text().trim().to_string()));
+        });
+    }
+    {
+        let tx = cmd_tx.clone();
+        refresh_nodes_btn.connect_clicked(move |_| {
+            let _ = tx.send(WorkerCmd::RefreshNodes);
         });
     }
     {

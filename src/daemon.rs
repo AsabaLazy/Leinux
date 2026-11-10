@@ -989,6 +989,170 @@ fn harvest_webapi_log_profiles(candidate_dirs: &[PathBuf]) -> Vec<Value> {
     recovered
 }
 
+fn fetch_cloud_profiles_seed(rounds: usize) -> Vec<Value> {
+    let mut merged_geo: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut s5_auth = "USER831173:PASS331250181986".to_string();
+    let mut ss_auth = "aes-256-cfb:PASS331250181986".to_string();
+    let mut proxy_url = "https://dfs01.nn.com/v2/default/1794272400/3393/pcipwhite.txt".to_string();
+
+    thread::scope(|s| {
+        let white_handle = s.spawn(|| {
+            Command::new("curl")
+                .args([
+                    "-fsSL",
+                    "--max-time",
+                    "4",
+                    "-H",
+                    "appId: nnMobile_d0k3duup",
+                    "-H",
+                    "version: 600",
+                    "-H",
+                    "reqChannel: 2",
+                    "-H",
+                    "platform: 2",
+                    "-H",
+                    "busiType: nn_aksjfdasoifnkls",
+                    "https://opapi.xxghh.biz/speed/gamemaster/white/pc",
+                ])
+                .output()
+                .ok()
+                .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+        });
+
+        let handles: Vec<_> = (0..rounds)
+            .map(|_| {
+                s.spawn(|| {
+                    Command::new("curl")
+                        .args([
+                            "-fsSL",
+                            "--max-time",
+                            "4",
+                            "-X",
+                            "POST",
+                            "-H",
+                            "Content-Type: application/json",
+                            "-H",
+                            "appId: nnMobile_d0k3duup",
+                            "-H",
+                            "version: 600",
+                            "-H",
+                            "reqChannel: 2",
+                            "-H",
+                            "platform: 2",
+                            "-H",
+                            "busiType: nn_aksjfdasoifnkls",
+                            "-d",
+                            "{}",
+                            "https://opapi.xxghh.biz/speed/gamemaster/nodeInfo/areaRule?handleMobileRule=1",
+                        ])
+                        .output()
+                        .ok()
+                        .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+                })
+            })
+            .collect();
+
+        if let Ok(Some(wv)) = white_handle.join() {
+            if let Some(u) = wv["retData"]["fileUrl"].as_str() {
+                if !u.is_empty() {
+                    proxy_url = u.to_string();
+                }
+            }
+        }
+
+        for h in handles {
+            let Ok(Some(resp)) = h.join() else { continue };
+            let Some(ret_data) = resp["retData"].as_object() else { continue };
+            for (gk, gv) in ret_data {
+                let Some(nodes) = gv["nodes"].as_array() else { continue };
+                for n in nodes {
+                    let ip = n["proxyIp"].as_str().unwrap_or("").trim();
+                    let port = n["proxyPort"].as_i64().unwrap_or(5438);
+                    let user = n["proxyUser"].as_str().unwrap_or("USER831173").trim();
+                    let pass = n["proxyPass"].as_str().unwrap_or("PASS331250181986").trim();
+                    let enc = n["encryptedMethod"].as_str().unwrap_or("aes-256-cfb").trim();
+                    if ip.is_empty() {
+                        continue;
+                    }
+                    s5_auth = format!("{user}:{pass}");
+                    ss_auth = format!("{enc}:{pass}");
+                    let uri = format!("s5://{user}:{pass}@{ip}:{port}");
+                    merged_geo.entry(gk.clone()).or_default().insert(uri);
+                }
+            }
+        }
+    });
+
+    if merged_geo.is_empty() {
+        return Vec::new();
+    }
+
+    let mut geo_obj = Map::new();
+    geo_obj.insert("cn".to_string(), json!(["direct"]));
+    for (k, set) in &merged_geo {
+        let arr: Vec<Value> = set.iter().map(|u| json!(u)).collect();
+        geo_obj.insert(k.clone(), Value::Array(arr));
+    }
+
+    let hk_nodes: Vec<Value> = merged_geo
+        .get("hk")
+        .map(|s| {
+            s.iter()
+                .map(|u| json!({"node": u, "ping": 25, "speed_sign": FALLBACK_SIGN}))
+                .collect()
+        })
+        .unwrap_or_default();
+    let first_tcp = hk_nodes
+        .first()
+        .and_then(|n| n["node"].as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let (_, rtoken, uid) = read_ini_values();
+    let seed_conf = json!({
+        "game": {
+            "area": "hk",
+            "dyn_line": false,
+            "dynamic_geo_threshold": "1,50",
+            "dynamic_geo_udp": false,
+            "id": "2c92a50b86b5ad730186b5b58f980003",
+            "proxy": proxy_url,
+        },
+        "ipdata": {"path": "/opt/leigod/config/ipdatacloud_country.xdb"},
+        "limit": {"cdn_kb": 0, "data_kb": 16384, "down_kb": 8192, "play_kb": 8192, "up_kb": 8192},
+        "log": {"level": "none", "outFile": false},
+        "report": {
+            "domain": {"enable": false, "interval": 0, "url": ""},
+            "engineEventsReport": {"enable": false, "interval": 0, "url": ""},
+            "flowReport": {"enable": false, "interval": 0, "url": ""},
+            "heart": {"enable": true, "interval": 180, "url": "https://opapi.xxghh.biz/speed/router/heartbeat"},
+            "ipPortProtocolReport": {"enable": false, "interval": 0, "url": ""},
+            "statistics": {"enable": false, "interval": 0, "url": ""},
+        },
+        "rules": [{"host": ["geo:cn"], "serv": ["direct"]}],
+        "server": {
+            "allNode": hk_nodes,
+            "auth": {"s5": s5_auth, "ss": ss_auth},
+            "dns": resolve_local_dns_list(),
+            "dynNode": [],
+            "geo": Value::Object(geo_obj),
+            "tagNodeList": [],
+            "tcp": [first_tcp],
+        },
+        "user": {
+            "app_id": "nnMobile_d0k3duup",
+            "id": if uid.is_empty() { "205651888".to_string() } else { uid },
+            "reqChannel": "2",
+            "speed_sign": FALLBACK_SIGN,
+            "token": rtoken,
+            "version": "600",
+        }
+    });
+
+    let (clean_str, _, _) = sanitize_acc_conf(&seed_conf);
+    vec![make_profile("hk", &clean_str, hk_nodes.len(), 2, 0, "2c92a50b86b5ad730186b5b58f980003", "")]
+}
+
 fn file_sig(p: &Path) -> (u64, u64) {
     fs::metadata(p)
         .map(|m| (m.mtime_nsec() as u64, m.len()))
@@ -1112,6 +1276,14 @@ pub fn scan_and_capture_active_profiles() -> Vec<Value> {
     if !harvested.is_empty() {
         profiles.extend(harvested);
         changed = true;
+    }
+
+    if profiles.is_empty() {
+        let seeded = fetch_cloud_profiles_seed(6);
+        if !seeded.is_empty() {
+            profiles.extend(seeded);
+            changed = true;
+        }
     }
 
     if changed {
@@ -1448,6 +1620,26 @@ fn handle_client(stream: TcpStream) {
                     200,
                     &json!({"ok": true, "msg": "已清理 GAMEACC 链、策略路由表 99、ipset 与残留 tun 接口"}),
                 );
+            }
+            "/api/profiles/refresh" => {
+                let mut profiles = load_saved_profiles();
+                let seeded = fetch_cloud_profiles_seed(8);
+                if seeded.is_empty() {
+                    send_json(
+                        stream,
+                        502,
+                        &json!({"ok": false, "msg": "从雷神云端拉取节点失败，请检查网络连接"}),
+                    );
+                } else {
+                    profiles.extend(seeded);
+                    let (cons, _) = consolidate_regional_profiles(profiles);
+                    save_profiles(&cons);
+                    send_json(
+                        stream,
+                        200,
+                        &json!({"ok": true, "count": cons.len(), "msg": format!("已从雷神云端同步 {} 个区服最新节点池", cons.len())}),
+                    );
+                }
             }
             "/api/service-restart" => {
                 let ok = Command::new("systemctl")
