@@ -1,5 +1,5 @@
 use crate::net::{
-    check_firewall_residuals, check_plugin_service, flush_dns_cache, has_active_tun,
+    check_firewall_periodic, check_plugin_service, flush_dns_cache, has_active_tun,
     install_mangle_guard, list_tun_interfaces, probe_udp_6066, read_iface_bytes, read_ini_values,
     resolve_local_dns_list, run_cleanup_net, set_stop_enforced,
 };
@@ -431,7 +431,7 @@ pub fn run_daemon() {
             }
             if tick.is_multiple_of(10) {
                 let _ = scan_profiles();
-                let _ = check_firewall_residuals();
+                check_firewall_periodic(tick.is_multiple_of(150));
             }
             tick = tick.wrapping_add(1);
             thread::sleep(Duration::from_millis(200));

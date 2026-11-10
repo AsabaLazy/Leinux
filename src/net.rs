@@ -9,7 +9,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,8 @@ const BYPASS_DNS_KEYWORDS: [&str; 9] = [
 ];
 
 static STOP_ENFORCED: AtomicBool = AtomicBool::new(false);
+static FW_VERIFIED_CLEAN: AtomicBool = AtomicBool::new(false);
+static CACHED_PLUGIN_PID: AtomicU32 = AtomicU32::new(0);
 
 struct GatewayCache {
     ts: Option<Instant>,
@@ -31,6 +33,7 @@ fn gw_cache() -> &'static Mutex<GatewayCache> {
 
 pub fn set_stop_enforced(enforced: bool) {
     STOP_ENFORCED.store(enforced, Ordering::SeqCst);
+    FW_VERIFIED_CLEAN.store(false, Ordering::SeqCst);
 }
 
 pub fn is_stop_enforced() -> bool {
@@ -121,12 +124,23 @@ pub fn probe_udp_6066() -> &'static str {
     "未检测到 6066/udp 监听"
 }
 
+fn is_plugin_pid(pid: u32) -> bool {
+    pid > 0
+        && fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|cmd| cmd.windows(19).any(|w| w == b"acc-gw.router.amd64"))
+}
+
 pub fn find_plugin_pid() -> Option<u32> {
-    fs::read_dir("/proc").ok()?.flatten().find_map(|entry| {
+    let cached = CACHED_PLUGIN_PID.load(Ordering::Relaxed);
+    if is_plugin_pid(cached) {
+        return Some(cached);
+    }
+    let found = fs::read_dir("/proc").ok()?.flatten().find_map(|entry| {
         let pid = entry.file_name().into_string().ok()?.parse::<u32>().ok()?;
-        let cmd = fs::read(entry.path().join("cmdline")).ok()?;
-        cmd.windows(19).any(|w| w == b"acc-gw.router.amd64").then_some(pid)
-    })
+        is_plugin_pid(pid).then_some(pid)
+    })?;
+    CACHED_PLUGIN_PID.store(found, Ordering::Relaxed);
+    Some(found)
 }
 
 pub fn check_plugin_service() -> (bool, String) {
@@ -373,10 +387,14 @@ pub fn check_firewall_residuals() -> bool {
         if has_rules || has_tun {
             run_cleanup_net();
             flush_dns_cache();
+            FW_VERIFIED_CLEAN.store(false, Ordering::SeqCst);
+        } else {
+            FW_VERIFIED_CLEAN.store(true, Ordering::SeqCst);
         }
         return false;
     }
     if has_rules {
+        FW_VERIFIED_CLEAN.store(false, Ordering::SeqCst);
         if !s.lines().nth(1).is_some_and(|l| l.contains("LEIGOD_GUARD")) {
             install_mangle_guard();
         }
@@ -385,5 +403,12 @@ pub fn check_firewall_residuals() -> bool {
     if s.contains("-A OUTPUT -j LEIGOD_GUARD") {
         remove_mangle_guard();
     }
+    FW_VERIFIED_CLEAN.store(!has_tun, Ordering::SeqCst);
     false
+}
+
+pub fn check_firewall_periodic(force: bool) {
+    if force || has_active_tun() || !FW_VERIFIED_CLEAN.load(Ordering::SeqCst) {
+        let _ = check_firewall_residuals();
+    }
 }
