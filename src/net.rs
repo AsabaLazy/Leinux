@@ -1,9 +1,12 @@
-use crate::types::LEIGOD_DIR;
+use crate::types::{IniValues, LEIGOD_DIR};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::net::{SocketAddr, UdpSocket};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,16 +41,41 @@ pub fn state_dir() -> PathBuf {
     PathBuf::from(env::var("LEIGOD_STATE_DIR").unwrap_or_else(|_| "/var/lib/leigod".to_string()))
 }
 
-pub fn read_device_mac() -> String {
-    for p in [PathBuf::from("/sys/class/net/wlan0/address"), state_dir().join("device-mac")] {
-        if let Ok(s) = fs::read_to_string(p) {
-            let trimmed = s.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
+pub fn read_json_or_default<T: DeserializeOwned + Default>(path: &Path) -> T {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn write_json_atomic<T: Serialize>(path: &Path, val: &T, pretty: bool, mode: Option<u32>) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
     }
-    String::new()
+    let serialized = if pretty {
+        serde_json::to_string_pretty(val)
+    } else {
+        serde_json::to_string(val)
+    };
+    let Ok(body) = serialized else { return };
+    let tmp = path.with_extension("tmp");
+    if fs::write(&tmp, body).is_ok() {
+        if let Some(m) = mode {
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(m));
+        }
+        let _ = fs::rename(&tmp, path);
+    }
+}
+
+pub fn read_device_mac() -> String {
+    [PathBuf::from("/sys/class/net/wlan0/address"), state_dir().join("device-mac")]
+        .into_iter()
+        .find_map(|p| {
+            let s = fs::read_to_string(p).ok()?;
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .unwrap_or_default()
 }
 
 pub fn list_tun_interfaces() -> Vec<String> {
@@ -80,32 +108,25 @@ pub fn read_iface_bytes(iface: &str) -> (u64, u64) {
 pub fn probe_udp_6066() -> &'static str {
     for path in ["/proc/net/udp", "/proc/net/udp6"] {
         let Ok(text) = fs::read_to_string(path) else { continue };
-        for line in text.lines().skip(1) {
-            let Some(local_addr) = line.split_whitespace().nth(1) else { continue };
-            if local_addr
-                .split(':')
+        let listening = text.lines().skip(1).any(|line| {
+            line.split_whitespace()
                 .nth(1)
-                .map(|port| port.eq_ignore_ascii_case("17b2"))
-                .unwrap_or(false)
-            {
-                return "监听正常 (6066/udp)";
-            }
+                .and_then(|addr| addr.split(':').nth(1))
+                .is_some_and(|port| port.eq_ignore_ascii_case("17b2"))
+        });
+        if listening {
+            return "监听正常 (6066/udp)";
         }
     }
     "未检测到 6066/udp 监听"
 }
 
 pub fn find_plugin_pid() -> Option<u32> {
-    let entries = fs::read_dir("/proc").ok()?;
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else { continue };
-        let Ok(pid) = name.parse::<u32>() else { continue };
-        let Ok(cmd) = fs::read(entry.path().join("cmdline")) else { continue };
-        if cmd.windows(19).any(|w| w == b"acc-gw.router.amd64") {
-            return Some(pid);
-        }
-    }
-    None
+    fs::read_dir("/proc").ok()?.flatten().find_map(|entry| {
+        let pid = entry.file_name().into_string().ok()?.parse::<u32>().ok()?;
+        let cmd = fs::read(entry.path().join("cmdline")).ok()?;
+        cmd.windows(19).any(|w| w == b"acc-gw.router.amd64").then_some(pid)
+    })
 }
 
 pub fn check_plugin_service() -> (bool, String) {
@@ -124,45 +145,40 @@ pub fn check_plugin_service() -> (bool, String) {
     }
 }
 
-pub fn read_ini_values() -> (String, String, String) {
-    let mut version = String::new();
-    let mut token = String::new();
-    let mut user_id = String::new();
+pub fn read_ini_values() -> IniValues {
+    let mut ini = IniValues::default();
+    let base = Path::new(LEIGOD_DIR);
 
-    if let Ok(text) = fs::read_to_string(Path::new(LEIGOD_DIR).join("config/acc_version.ini")) {
+    if let Ok(text) = fs::read_to_string(base.join("config/acc_version.ini")) {
         for (k, v) in text.lines().filter_map(|l| l.trim().split_once('=')) {
             if k.trim().eq_ignore_ascii_case("version") {
-                version = v.trim().to_string();
+                ini.version = v.trim().to_string();
             }
         }
     }
-    if let Ok(text) = fs::read_to_string(Path::new(LEIGOD_DIR).join("config/accelerator.ini")) {
+    if let Ok(text) = fs::read_to_string(base.join("config/accelerator.ini")) {
         for (k, v) in text.lines().filter_map(|l| l.trim().split_once('=')) {
             let val = v.trim();
             if val.is_empty() {
                 continue;
             }
             match k.trim().to_ascii_lowercase().as_str() {
-                "token" | "bind_token" | "rtoken" => token = val.to_string(),
-                "user_id" | "userid" => user_id = val.to_string(),
+                "token" | "bind_token" | "rtoken" => ini.rtoken = val.to_string(),
+                "user_id" | "userid" => ini.user_id = val.to_string(),
                 _ => {}
             }
         }
     }
-    (version, token, user_id)
+    ini
 }
 
 pub fn flush_dns_cache() {
     let _ = Command::new("resolvectl").arg("flush-caches").output();
 }
 
-pub fn probe_dns_real_ip(server_ip: &str) -> bool {
-    let Ok(addr) = format!("{server_ip}:53").parse::<SocketAddr>() else {
-        return false;
-    };
-    let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else {
-        return false;
-    };
+fn probe_dns_real_ip(server_ip: &str) -> bool {
+    let Ok(addr) = format!("{server_ip}:53").parse::<SocketAddr>() else { return false };
+    let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else { return false };
     let _ = sock.set_read_timeout(Some(Duration::from_millis(400)));
     let _ = sock.set_write_timeout(Some(Duration::from_millis(400)));
     let query: &[u8] = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\
@@ -171,9 +187,7 @@ pub fn probe_dns_real_ip(server_ip: &str) -> bool {
         return false;
     }
     let mut buf = [0u8; 512];
-    let Ok((n, _)) = sock.recv_from(&mut buf) else {
-        return false;
-    };
+    let Ok((n, _)) = sock.recv_from(&mut buf) else { return false };
     if n < 16 || (buf[3] & 0x0f) != 0 {
         return false;
     }
@@ -181,32 +195,30 @@ pub fn probe_dns_real_ip(server_ip: &str) -> bool {
     !(ip[0] == 198 && (ip[1] == 18 || ip[1] == 19)) && ip[0] != 0 && ip[0] != 127
 }
 
+fn lladdr_from_neigh_line<'a>(parts: &[&'a str]) -> Option<&'a str> {
+    let idx = parts.iter().position(|&x| x == "lladdr")?;
+    parts.get(idx + 1).copied()
+}
+
 fn find_ipv6_router_ipv4() -> Option<String> {
     let v6_out = Command::new("ip").args(["-6", "neigh", "show"]).output().ok()?;
-    let mut router_macs = BTreeSet::new();
-    for line in String::from_utf8_lossy(&v6_out.stdout).lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if !parts.contains(&"router") {
-            continue;
-        }
-        if let Some(mac) = parts.iter().position(|&x| x == "lladdr").and_then(|i| parts.get(i + 1)) {
-            router_macs.insert(mac.to_ascii_lowercase());
-        }
-    }
+    let router_macs: BTreeSet<String> = String::from_utf8_lossy(&v6_out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            parts.contains(&"router").then(|| lladdr_from_neigh_line(&parts))?.map(str::to_ascii_lowercase)
+        })
+        .collect();
     if router_macs.is_empty() {
         return None;
     }
+
     let v4_out = Command::new("ip").args(["-4", "neigh", "show"]).output().ok()?;
-    for line in String::from_utf8_lossy(&v4_out.stdout).lines() {
+    String::from_utf8_lossy(&v4_out.stdout).lines().find_map(|line| {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        let Some(mac) = parts.iter().position(|&x| x == "lladdr").and_then(|i| parts.get(i + 1)) else {
-            continue;
-        };
-        if router_macs.contains(&mac.to_ascii_lowercase()) {
-            return parts.first().map(|ip| (*ip).to_string());
-        }
-    }
-    None
+        let mac = lladdr_from_neigh_line(&parts)?.to_ascii_lowercase();
+        router_macs.contains(&mac).then_some((*parts.first()?).to_string())
+    })
 }
 
 fn read_default_route_gw() -> String {
@@ -225,7 +237,7 @@ fn read_default_route_gw() -> String {
 
 pub fn detect_gateway_ip() -> String {
     if let Ok(guard) = gw_cache().lock() {
-        if guard.ts.map(|t| t.elapsed() < Duration::from_secs(60)).unwrap_or(false) && !guard.ip.is_empty() {
+        if guard.ts.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) && !guard.ip.is_empty() {
             return guard.ip.clone();
         }
     }
@@ -240,12 +252,12 @@ pub fn detect_gateway_ip() -> String {
     }
     if chosen == default_gw && !default_gw.is_empty() && !probe_dns_real_ip(&default_gw) {
         if let Some((prefix, _)) = default_gw.rsplit_once('.') {
-            for suffix in ["1", "254"] {
-                let cand = format!("{prefix}.{suffix}");
-                if cand != default_gw && probe_dns_real_ip(&cand) {
-                    chosen = cand;
-                    break;
-                }
+            if let Some(cand) = ["1", "254"]
+                .into_iter()
+                .map(|sfx| format!("{prefix}.{sfx}"))
+                .find(|cand| cand != &default_gw && probe_dns_real_ip(cand))
+            {
+                chosen = cand;
             }
         }
     }
@@ -262,24 +274,19 @@ pub fn detect_gateway_ip() -> String {
 
 pub fn resolve_local_dns_list(custom_dns: &str) -> Vec<String> {
     let custom = custom_dns.trim();
-    let mut dns_list = Vec::new();
-    if !custom.is_empty() {
-        for item in custom
+    let mut dns_list: Vec<String> = if !custom.is_empty() {
+        custom
             .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        {
-            dns_list.push(if item.contains(':') { item.to_string() } else { format!("{item}:53") });
-        }
+            .map(|s| if s.contains(':') { s.to_string() } else { format!("{s}:53") })
+            .collect()
     } else {
         let gw = detect_gateway_ip();
-        if !gw.is_empty() {
-            dns_list.push(format!("{gw}:53"));
-        }
-    }
+        if gw.is_empty() { Vec::new() } else { vec![format!("{gw}:53")] }
+    };
     if dns_list.is_empty() {
-        dns_list.push("223.5.5.5:53".to_string());
-        dns_list.push("114.114.114.114:53".to_string());
+        dns_list.extend(["223.5.5.5:53".to_string(), "114.114.114.114:53".to_string()]);
     }
     dns_list
 }
@@ -290,8 +297,7 @@ fn run_ipt(args: &[&str]) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 pub fn install_mangle_guard() {
@@ -331,8 +337,7 @@ pub fn install_mangle_guard() {
             }
             child.wait()
         })
-        .map(|s| s.success())
-        .unwrap_or(false);
+        .is_ok_and(|s| s.success());
 
     if !restored {
         let _ = run_ipt(&["-t", "mangle", "-N", "LEIGOD_GUARD"]);
@@ -371,7 +376,7 @@ pub fn check_firewall_residuals() -> bool {
         return false;
     }
     if has_rules {
-        if !s.lines().nth(1).map(|l| l.contains("LEIGOD_GUARD")).unwrap_or(false) {
+        if !s.lines().nth(1).is_some_and(|l| l.contains("LEIGOD_GUARD")) {
             install_mangle_guard();
         }
         return true;

@@ -18,6 +18,49 @@ pub const CONTINENT_ORDER: [&str; 8] = [
     "其他地区",
 ];
 
+pub trait ValueExt {
+    fn as_i64_lossy(&self) -> Option<i64>;
+    fn as_str_lossy(&self) -> Option<String>;
+}
+
+impl ValueExt for Value {
+    fn as_i64_lossy(&self) -> Option<i64> {
+        self.as_i64().or_else(|| self.as_str()?.trim().parse().ok())
+    }
+
+    fn as_str_lossy(&self) -> Option<String> {
+        self.as_str()
+            .map(str::to_string)
+            .or_else(|| self.as_i64().map(|n| n.to_string()))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IniValues {
+    pub version: String,
+    pub rtoken: String,
+    pub user_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActiveAccState {
+    pub is_accelerating: bool,
+    pub active_area: String,
+    pub net_delay: i64,
+    pub loss_rate: String,
+}
+
+impl Default for ActiveAccState {
+    fn default() -> Self {
+        Self {
+            is_accelerating: false,
+            active_area: String::new(),
+            net_delay: 0,
+            loss_rate: "0".to_string(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -132,32 +175,33 @@ pub fn is_internal_geo_key(area: &str) -> bool {
 }
 
 pub fn format_region_title(area: &str) -> String {
-    match area.trim().to_lowercase().as_str() {
-        "hk" => "中国香港".to_string(),
-        "tw" => "中国台湾".to_string(),
-        "jp" => "日本".to_string(),
-        "kr" => "韩国".to_string(),
-        "asia" => "亚洲通用".to_string(),
-        "sea" => "新加坡".to_string(),
-        "my" => "马来西亚".to_string(),
-        "vn" => "越南".to_string(),
-        "ph" => "菲律宾".to_string(),
-        "idn" => "印度尼西亚".to_string(),
-        "ind" => "印度".to_string(),
-        "pk" => "巴基斯坦".to_string(),
-        "de" => "德国".to_string(),
-        "eu" => "欧洲通用".to_string(),
-        "ru" => "俄罗斯".to_string(),
-        "tr" => "土耳其".to_string(),
-        "ua" => "乌克兰".to_string(),
-        "kaz" => "哈萨克斯坦".to_string(),
-        "us" => "美国".to_string(),
-        "au" => "澳大利亚".to_string(),
-        "br" => "巴西".to_string(),
-        "arg" => "阿根廷".to_string(),
-        "mx" => "墨西哥".to_string(),
-        other => other.to_uppercase(),
-    }
+    let title = match area.trim().to_lowercase().as_str() {
+        "hk" => "中国香港",
+        "tw" => "中国台湾",
+        "jp" => "日本",
+        "kr" => "韩国",
+        "asia" => "亚洲通用",
+        "sea" => "新加坡",
+        "my" => "马来西亚",
+        "vn" => "越南",
+        "ph" => "菲律宾",
+        "idn" => "印度尼西亚",
+        "ind" => "印度",
+        "pk" => "巴基斯坦",
+        "de" => "德国",
+        "eu" => "欧洲通用",
+        "ru" => "俄罗斯",
+        "tr" => "土耳其",
+        "ua" => "乌克兰",
+        "kaz" => "哈萨克斯坦",
+        "us" => "美国",
+        "au" => "澳大利亚",
+        "br" => "巴西",
+        "arg" => "阿根廷",
+        "mx" => "墨西哥",
+        other => return other.to_uppercase(),
+    };
+    title.to_string()
 }
 
 pub fn format_region_continent(area: &str) -> &'static str {
@@ -175,14 +219,14 @@ pub fn format_region_continent(area: &str) -> &'static str {
     }
 }
 
-pub fn is_continent_wide_area(area: &str) -> bool {
+fn is_continent_wide_area(area: &str) -> bool {
     matches!(
         area.trim().to_lowercase().as_str(),
         "asia" | "eu" | "na" | "sa" | "oc" | "af" | "an"
     )
 }
 
-pub fn continent_sort_rank(continent: &str) -> usize {
+fn continent_sort_rank(continent: &str) -> usize {
     CONTINENT_ORDER.iter().position(|&c| c == continent).unwrap_or(99)
 }
 

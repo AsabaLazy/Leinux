@@ -1,14 +1,15 @@
 use crate::net::{
     detect_gateway_ip, flush_dns_cache, install_mangle_guard, read_device_mac, read_ini_values,
-    remove_mangle_guard, run_cleanup_net, set_stop_enforced, state_dir,
+    read_json_or_default, remove_mangle_guard, run_cleanup_net, set_stop_enforced, state_dir,
+    write_json_atomic,
 };
 use crate::profiles::cached_profile_p_token;
-use crate::types::{AccountConfig, AccountSnapshot, APP_ID, BUSI_TYPE, WEBAPI_BASE};
+use crate::types::{
+    AccountConfig, AccountSnapshot, ActiveAccState, ValueExt, APP_ID, BUSI_TYPE, WEBAPI_BASE,
+};
 use serde_json::{json, Map, Value};
-use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -18,23 +19,11 @@ fn account_file() -> PathBuf {
 }
 
 pub fn load_account_config() -> AccountConfig {
-    let Ok(text) = fs::read_to_string(account_file()) else {
-        return AccountConfig::default();
-    };
-    serde_json::from_str(&text).unwrap_or_default()
+    read_json_or_default(&account_file())
 }
 
 pub fn save_account_config(cfg: &AccountConfig) {
-    let dir = state_dir();
-    let _ = fs::create_dir_all(&dir);
-    let p = account_file();
-    let tmp = p.with_extension("tmp");
-    if let Ok(s) = serde_json::to_string_pretty(cfg) {
-        if fs::write(&tmp, s).is_ok() {
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-            let _ = fs::rename(&tmp, &p);
-        }
-    }
+    write_json_atomic(&account_file(), cfg, true, Some(0o600));
 }
 
 pub fn is_valid_ptoken(tok: &str) -> bool {
@@ -44,9 +33,10 @@ pub fn is_valid_ptoken(tok: &str) -> bool {
 
 pub fn resolve_p_token(cfg: &AccountConfig) -> String {
     if is_valid_ptoken(&cfg.p_token) {
-        return cfg.p_token.trim().to_string();
+        cfg.p_token.trim().to_string()
+    } else {
+        cached_profile_p_token()
     }
-    cached_profile_p_token()
 }
 
 fn escape_curl_cfg(val: &str) -> String {
@@ -152,8 +142,7 @@ pub fn ws_rpc_call(host: &str, port: u16, path: &str, payload: &Value, timeout_m
         }
     }
 
-    let body = payload.to_string().into_bytes();
-    write_ws_frame(&mut sock, 0x1, &body)?;
+    write_ws_frame(&mut sock, 0x1, &payload.to_string().into_bytes())?;
 
     loop {
         let mut hdr = [0u8; 2];
@@ -192,25 +181,32 @@ pub fn ws_rpc_call(host: &str, port: u16, path: &str, payload: &Value, timeout_m
     }
 }
 
-fn unwrap_ws_data(resp: &Value) -> Value {
-    if let Some(s) = resp["data"].as_str() {
-        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-            return parsed;
-        }
-    }
-    resp["data"].clone()
+pub fn core_rpc(cmd: &str, data: Value, timeout_ms: u64) -> Result<Value, String> {
+    let req = json!({
+        "cmd": cmd,
+        "tag": "leinux",
+        "sn": "",
+        "cli": "leinux",
+        "code": 0,
+        "err": "",
+        "data": data,
+    });
+    ws_rpc_call("127.0.0.1", 5588, "/ws", &req, timeout_ms)
 }
 
-pub fn query_active_acc_state(token: &str) -> (bool, String, i64, String) {
+fn unwrap_ws_data(resp: &Value) -> Value {
+    resp["data"]
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or_else(|| resp["data"].clone())
+}
+
+pub fn query_active_acc_state(token: &str) -> ActiveAccState {
     if token.trim().is_empty() {
-        return (false, String::new(), 0, "0".to_string());
+        return ActiveAccState::default();
     }
-    let dev_req = json!({
-        "cmd": "GETDEVICELIST", "tag": "1", "sn": "", "cli": "leinux",
-        "code": 0, "err": "", "data": {"token": token}
-    });
-    let Ok(dev_resp) = ws_rpc_call("127.0.0.1", 5588, "/ws", &dev_req, 1500) else {
-        return (false, String::new(), 0, "0".to_string());
+    let Ok(dev_resp) = core_rpc("GETDEVICELIST", json!({"token": token}), 1500) else {
+        return ActiveAccState::default();
     };
     let d = unwrap_ws_data(&dev_resp);
     let list = d
@@ -220,41 +216,30 @@ pub fn query_active_acc_state(token: &str) -> (bool, String, i64, String) {
 
     let Some(active) = list.and_then(|arr| {
         arr.iter().find(|x| {
-            x["accState"].as_i64() == Some(1)
-                || x["accState"].as_str() == Some("1")
+            x["accState"].as_i64_lossy() == Some(1)
                 || x["accState"].as_str() == Some("started")
-                || x["state"].as_i64() == Some(1)
+                || x["state"].as_i64_lossy() == Some(1)
         })
     }) else {
-        return (false, String::new(), 0, "0".to_string());
+        return ActiveAccState::default();
     };
 
-    let active_area = active["area"].as_str().unwrap_or("hk").to_lowercase();
-    let info_req = json!({
-        "cmd": "GETACCINFO", "tag": "2", "sn": "", "cli": "leinux",
-        "code": 0, "err": "", "data": {"token": token}
-    });
-    let mut net_delay = 0i64;
-    let mut loss_rate = "0".to_string();
-    if let Ok(ainfo_resp) = ws_rpc_call("127.0.0.1", 5588, "/ws", &info_req, 1500) {
+    let mut state = ActiveAccState {
+        is_accelerating: true,
+        active_area: active["area"].as_str().unwrap_or("hk").to_lowercase(),
+        ..Default::default()
+    };
+
+    if let Ok(ainfo_resp) = core_rpc("GETACCINFO", json!({"token": token}), 1500) {
         let ainfo = unwrap_ws_data(&ainfo_resp);
         let obj = if ainfo["accInfo"].is_object() { &ainfo["accInfo"] } else { &ainfo };
-        net_delay = obj["netDelay"]
-            .as_str()
-            .and_then(|s| s.parse().ok())
-            .or_else(|| obj["netDelay"].as_i64())
-            .unwrap_or(0);
-        loss_rate = obj["lossRate"]
-            .as_str()
-            .map(str::to_string)
-            .or_else(|| obj["lossRate"].as_i64().map(|n| n.to_string()))
-            .unwrap_or_else(|| "0".to_string());
+        state.net_delay = obj["netDelay"].as_i64_lossy().unwrap_or(0);
+        state.loss_rate = obj["lossRate"].as_str_lossy().unwrap_or_else(|| "0".to_string());
     }
-
-    (true, active_area, net_delay, loss_rate)
+    state
 }
 
-pub fn webapi_post(endpoint: &str, account_token: &str) -> Result<Value, String> {
+fn webapi_post(endpoint: &str, account_token: &str) -> Result<Value, String> {
     let url = format!("{WEBAPI_BASE}{endpoint}");
     let body = json!({
         "account_token": account_token,
@@ -299,31 +284,34 @@ pub fn exchange_ptoken_for_web_token(p_token: &str) -> Option<(String, String)> 
     )
     .ok()?;
     let ret_obj = d1["retData"].as_object()?;
-    let uid = ret_obj
-        .get("user_id")
-        .and_then(|v| v.as_i64().map(|n| n.to_string()).or_else(|| v.as_str().map(str::to_string)))
-        .unwrap_or_default();
+    let uid = ret_obj.get("user_id").and_then(Value::as_str_lossy).unwrap_or_default();
 
     let clean_body: Map<String, Value> = ret_obj
         .iter()
         .filter(|(_, v)| !v.is_null())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let body_str = Value::Object(clean_body).to_string();
 
     let d2 = curl_json(
         "POST",
         "https://webapi.xxghh.biz/passport/web/token",
         &[("Content-Type", "application/json")],
-        Some(&body_str),
+        Some(&Value::Object(clean_body).to_string()),
         5,
     )
     .ok()?;
     let acct_tok = d2["data"]["account_token"].as_str()?.trim().to_string();
-    if acct_tok.is_empty() {
-        return None;
+    (!acct_tok.is_empty()).then_some((acct_tok, uid))
+}
+
+pub fn refresh_web_token(cfg: &mut AccountConfig, p_token: &str) -> Option<String> {
+    let (new_tok, uid) = exchange_ptoken_for_web_token(p_token)?;
+    cfg.account_token = new_tok.clone();
+    cfg.p_token = p_token.trim().to_string();
+    if !uid.is_empty() {
+        cfg.user_id = uid;
     }
-    Some((acct_tok, uid))
+    Some(new_tok)
 }
 
 pub fn ensure_router_bound(p_token: &str, user_id: &str, force: bool) -> bool {
@@ -331,15 +319,15 @@ pub fn ensure_router_bound(p_token: &str, user_id: &str, force: bool) -> bool {
     if p_token.is_empty() {
         return false;
     }
-    let (_, cur_rtoken, cur_uid) = read_ini_values();
-    let same_user = user_id.trim().is_empty() || cur_uid == user_id.trim();
-    if !force && same_user && !cur_rtoken.is_empty() && !cur_rtoken.starts_with('<') {
+    let ini = read_ini_values();
+    let same_user = user_id.trim().is_empty() || ini.user_id == user_id.trim();
+    if !force && same_user && !ini.rtoken.is_empty() && !ini.rtoken.starts_with('<') {
         return true;
     }
     let uid = if !user_id.trim().is_empty() {
         user_id.trim().to_string()
-    } else if !cur_uid.is_empty() {
-        cur_uid
+    } else if !ini.user_id.is_empty() {
+        ini.user_id
     } else if let Some((_, u)) = exchange_ptoken_for_web_token(p_token) {
         u
     } else {
@@ -360,8 +348,7 @@ pub fn ensure_router_bound(p_token: &str, user_id: &str, force: bool) -> bool {
         }
     });
     ws_rpc_call("127.0.0.1", 5588, "/ws", &req, 6000)
-        .map(|res| res["code"].as_i64() == Some(0))
-        .unwrap_or(false)
+        .is_ok_and(|res| res["code"].as_i64() == Some(0))
 }
 
 pub fn webapi_post_with_auto_renew(endpoint: &str) -> Result<Value, String> {
@@ -371,21 +358,13 @@ pub fn webapi_post_with_auto_renew(endpoint: &str) -> Result<Value, String> {
     if !p_tok.is_empty() {
         let _ = ensure_router_bound(&p_tok, &cfg.user_id, false);
     }
-
-    if cfg.account_token.trim().is_empty() && !p_tok.is_empty() {
-        if let Some((new_tok, uid)) = exchange_ptoken_for_web_token(&p_tok) {
-            cfg.account_token = new_tok;
-            cfg.p_token = p_tok.clone();
-            if !uid.is_empty() {
-                cfg.user_id = uid;
-            }
-            save_account_config(&cfg);
-        }
+    if cfg.account_token.trim().is_empty() && !p_tok.is_empty() && refresh_web_token(&mut cfg, &p_tok).is_some() {
+        save_account_config(&cfg);
     }
 
     let acct_tok = cfg.account_token.trim().to_string();
     if acct_tok.is_empty() {
-        return Err("请先配置官网 account_token 或移动端 pToken".to_string());
+        return Err("请先登录雷神账号或填入 Token".to_string());
     }
 
     let first = webapi_post(endpoint, &acct_tok);
@@ -394,12 +373,7 @@ pub fn webapi_post_with_auto_renew(endpoint: &str) -> Result<Value, String> {
     }
 
     if !p_tok.is_empty() {
-        if let Some((new_tok, uid)) = exchange_ptoken_for_web_token(&p_tok) {
-            cfg.account_token = new_tok.clone();
-            cfg.p_token = p_tok;
-            if !uid.is_empty() {
-                cfg.user_id = uid;
-            }
+        if let Some(new_tok) = refresh_web_token(&mut cfg, &p_tok) {
             save_account_config(&cfg);
             return webapi_post(endpoint, &new_tok);
         }
@@ -407,40 +381,38 @@ pub fn webapi_post_with_auto_renew(endpoint: &str) -> Result<Value, String> {
     first
 }
 
+fn gateway_dns_label() -> String {
+    let gw = detect_gateway_ip();
+    if gw.is_empty() { "223.5.5.5:53".to_string() } else { format!("{gw}:53") }
+}
+
 pub fn fetch_account_snapshot() -> AccountSnapshot {
     let cfg = load_account_config();
     let p_tok = resolve_p_token(&cfg);
-    let gw = detect_gateway_ip();
-    let detected_gateway_dns = if gw.is_empty() {
-        "223.5.5.5:53".to_string()
-    } else {
-        format!("{gw}:53")
-    };
+    let detected_gateway_dns = gateway_dns_label();
     let configured = !cfg.account_token.trim().is_empty() || !p_tok.is_empty();
+
     if !configured {
         return AccountSnapshot {
             configured: false,
             paused: true,
-            hours: 0,
-            mins: 0,
             sub_text: "未配置 Token".to_string(),
             auto_pause_on_stop: cfg.auto_pause_on_stop,
             custom_dns: cfg.custom_dns,
             detected_gateway_dns,
+            ..Default::default()
         };
     }
 
     match webapi_post_with_auto_renew("/api/user/info") {
         Ok(res) if res["code"].as_i64() == Some(0) && res["data"].is_object() => {
             let d = &res["data"];
-            let paused = d["pause_status_id"].as_i64().unwrap_or(1) == 1
-                || d["pause_status_id"].as_str() == Some("1");
+            let paused = d["pause_status_id"].as_i64_lossy().unwrap_or(1) == 1;
             let sec = d["expiry_time_samp"]
-                .as_i64()
-                .or_else(|| d["expiry_time_samp"].as_str().and_then(|s| s.parse().ok()))
-                .or_else(|| d["user_pause_time"].as_i64())
+                .as_i64_lossy()
+                .or_else(|| d["user_pause_time"].as_i64_lossy())
                 .unwrap_or(0);
-            let nick = d["nickname"]
+            let sub_text = d["nickname"]
                 .as_str()
                 .or_else(|| d["mobile"].as_str())
                 .unwrap_or("已认证")
@@ -450,7 +422,7 @@ pub fn fetch_account_snapshot() -> AccountSnapshot {
                 paused,
                 hours: sec / 3600,
                 mins: (sec % 3600) / 60,
-                sub_text: nick,
+                sub_text,
                 auto_pause_on_stop: cfg.auto_pause_on_stop,
                 custom_dns: cfg.custom_dns,
                 detected_gateway_dns,
@@ -459,36 +431,21 @@ pub fn fetch_account_snapshot() -> AccountSnapshot {
         _ => AccountSnapshot {
             configured: true,
             paused: true,
-            hours: 0,
-            mins: 0,
             sub_text: "Token 已过期".to_string(),
             auto_pause_on_stop: cfg.auto_pause_on_stop,
             custom_dns: cfg.custom_dns,
             detected_gateway_dns,
+            ..Default::default()
         },
     }
 }
 
 pub fn pause_account_time() -> Value {
     set_stop_enforced(true);
-    let (_, router_token, _) = read_ini_values();
-    if !router_token.is_empty() {
+    let ini = read_ini_values();
+    if !ini.rtoken.is_empty() {
         install_mangle_guard();
-        let _ = ws_rpc_call(
-            "127.0.0.1",
-            5588,
-            "/ws",
-            &json!({
-                "cmd": "STOPACC",
-                "tag": "pause-stop",
-                "sn": "",
-                "cli": "leinux",
-                "code": 0,
-                "err": "",
-                "data": {"token": router_token, "catalogs": [2]},
-            }),
-            3000,
-        );
+        let _ = core_rpc("STOPACC", json!({"token": ini.rtoken, "catalogs": [2]}), 3000);
     }
     run_cleanup_net();
     remove_mangle_guard();
@@ -502,8 +459,6 @@ pub fn pause_account_time() -> Value {
             "msg": "已停止本地加速（未配置官网 Token，未暂停官网时长）"
         });
     }
-    match webapi_post_with_auto_renew("/api/user/pause") {
-        Ok(v) => v,
-        Err(e) => json!({"code": -1, "msg": e}),
-    }
+    webapi_post_with_auto_renew("/api/user/pause")
+        .unwrap_or_else(|e| json!({"code": -1, "msg": e}))
 }

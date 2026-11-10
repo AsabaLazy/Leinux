@@ -6,6 +6,7 @@ use gtk4 as gtk;
 use gtk4::glib;
 use serde_json::json;
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
@@ -20,11 +21,11 @@ enum WorkerEvent {
 }
 
 enum WorkerCmd {
-    StartArea(String, String),
+    StartArea { area: String, name: String },
     SaveLastArea(String),
     PauseAccount,
     RecoverAccount,
-    SaveToken(String, bool),
+    SaveToken { token: String, auto_pause: bool },
     SaveAutoPause(bool),
     SaveCustomDns(String),
     RefreshNodes,
@@ -46,10 +47,9 @@ struct GuiState {
 
 impl GuiState {
     fn selected_profile(&self) -> Option<&ProfileSummary> {
-        if self.selected_area.is_empty() {
-            return None;
-        }
-        self.profiles.iter().find(|p| p.area == self.selected_area)
+        (!self.selected_area.is_empty())
+            .then(|| self.profiles.iter().find(|p| p.area == self.selected_area))
+            .flatten()
     }
 }
 
@@ -70,7 +70,7 @@ struct MainWidgets {
     total_val: gtk::Label,
     iface_val: gtk::Label,
     spark: gtk::DrawingArea,
-    speed_history: Rc<RefCell<Vec<f64>>>,
+    speed_history: Rc<RefCell<VecDeque<f64>>>,
     acct_row: adw::ActionRow,
     acct_btn: gtk::Button,
     toasts: adw::ToastOverlay,
@@ -91,6 +91,24 @@ struct PrefsWidgets {
     cleanup_btn: gtk::Button,
 }
 
+#[derive(Clone)]
+struct RegionPicker {
+    dialog: adw::Dialog,
+    filter_bar: gtk::Box,
+    list_box: gtk::Box,
+}
+
+#[derive(Clone)]
+struct UiCtx {
+    state: Rc<RefCell<GuiState>>,
+    suppress: Rc<Cell<bool>>,
+    mw: MainWidgets,
+    pw: PrefsWidgets,
+    picker: RegionPicker,
+    cmd_tx: mpsc::Sender<WorkerCmd>,
+    evt_tx: mpsc::Sender<WorkerEvent>,
+}
+
 fn format_bytes(bytes: f64, decimals: usize) -> String {
     let n = bytes.max(0.0);
     if n < 1024.0 {
@@ -98,7 +116,7 @@ fn format_bytes(bytes: f64, decimals: usize) -> String {
     } else if n < 1_048_576.0 {
         format!("{:.*} KB", decimals, n / 1024.0)
     } else if n < 1_073_741_824.0 {
-        format!("{:.*} MB", decimals, n / 1_048_576.0)
+        format!("{:.*} MB", decimals, n / 1048576.0)
     } else {
         format!("{:.*} GB", decimals, n / 1_073_741_824.0)
     }
@@ -125,7 +143,13 @@ fn button_row(title: &str, subtitle: &str, label: &str) -> (adw::ActionRow, gtk:
     (row, btn)
 }
 
-fn sparkline(history: Rc<RefCell<Vec<f64>>>) -> gtk::DrawingArea {
+fn clear_box(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
+fn sparkline(history: Rc<RefCell<VecDeque<f64>>>) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_width(84);
     area.set_content_height(24);
@@ -135,14 +159,14 @@ fn sparkline(history: Rc<RefCell<Vec<f64>>>) -> gtk::DrawingArea {
         if h.len() < 2 {
             return;
         }
-        let max = h.iter().cloned().fold(1.0, f64::max);
+        let max = h.iter().copied().fold(1.0, f64::max);
         let (wf, hf) = (width as f64, height as f64);
         let step = wf / (SPARK_POINTS - 1) as f64;
         let x0 = wf - step * (h.len() - 1) as f64;
         let c = w.color();
         cr.set_source_rgba(c.red() as f64, c.green() as f64, c.blue() as f64, 0.8);
         cr.set_line_width(1.5);
-        for (i, v) in h.iter().enumerate() {
+        for (i, &v) in h.iter().enumerate() {
             let x = x0 + step * i as f64;
             let y = hf - 1.0 - (v / max) * (hf - 2.0);
             if i == 0 { cr.move_to(x, y); } else { cr.line_to(x, y); }
@@ -155,26 +179,27 @@ fn sparkline(history: Rc<RefCell<Vec<f64>>>) -> gtk::DrawingArea {
 fn fetch_daemon_snapshot(known_rev: u64, include_account: bool) -> Option<DaemonSnapshot> {
     let path = format!(
         "/api/status?known_rev={known_rev}&include_account={}",
-        if include_account { 1 } else { 0 }
+        u8::from(include_account)
     );
     let timeout = if include_account { 6000 } else { 2500 };
-    let val = http_request("GET", &path, None, timeout).ok()?;
-    serde_json::from_value(val).ok()
+    http_request("GET", &path, None, timeout)
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
 }
 
 fn handle_worker_cmd(cmd: WorkerCmd, evt_tx: &mpsc::Sender<WorkerEvent>, known_rev: &mut u64) {
-    let toast = |msg: String| {
-        let _ = evt_tx.send(WorkerEvent::Toast(msg));
+    let toast = |msg: &str| {
+        let _ = evt_tx.send(WorkerEvent::Toast(msg.to_string()));
     };
     let mut refresh_account = false;
 
     match cmd {
-        WorkerCmd::StartArea(area, name) => {
-            toast(format!("正在恢复时长并启动 {name}..."));
+        WorkerCmd::StartArea { area, name } => {
+            toast(&format!("正在恢复时长并启动 {name}..."));
             match http_request("POST", "/api/acc/start", Some(&json!({"area": area, "recover": true})), 10000) {
-                Ok(res) if res["ok"].as_bool() == Some(true) => toast(format!("已启动 {name} 加速")),
-                Ok(res) => toast(res["msg"].as_str().unwrap_or("启动加速失败").to_string()),
-                Err(_) => toast("启动加速失败".to_string()),
+                Ok(res) if res["ok"].as_bool() == Some(true) => toast(&format!("已启动 {name} 加速")),
+                Ok(res) => toast(res["msg"].as_str().unwrap_or("启动加速失败")),
+                Err(_) => toast("启动加速失败"),
             }
             refresh_account = true;
         }
@@ -183,80 +208,78 @@ fn handle_worker_cmd(cmd: WorkerCmd, evt_tx: &mpsc::Sender<WorkerEvent>, known_r
             return;
         }
         WorkerCmd::PauseAccount => {
-            toast("正在断开隧道并暂停账号时长...".to_string());
+            toast("正在断开隧道并暂停账号时长...");
             if let Ok(res) = http_request("POST", "/api/account/pause", Some(&json!({})), 8000) {
-                let msg = if res["local_only"].as_bool() == Some(true) {
-                    res["msg"].as_str().unwrap_or("已停止本地加速").to_string()
+                if res["local_only"].as_bool() == Some(true) {
+                    toast(res["msg"].as_str().unwrap_or("已停止本地加速"));
                 } else if res["code"].as_i64() == Some(0) {
-                    "已停止加速并成功暂停账号时长".to_string()
+                    toast("已停止加速并成功暂停账号时长");
                 } else {
-                    format!("已停止加速 ({})", res["msg"].as_str().unwrap_or("官网暂停失败"))
-                };
-                toast(msg);
+                    toast(&format!("已停止加速 ({})", res["msg"].as_str().unwrap_or("官网暂停失败")));
+                }
             }
             refresh_account = true;
         }
         WorkerCmd::RecoverAccount => {
             if let Ok(res) = http_request("POST", "/api/account/recover", Some(&json!({})), 6000) {
-                let msg = if res["code"].as_i64() == Some(0) {
-                    "已恢复雷神账号时长".to_string()
+                if res["code"].as_i64() == Some(0) {
+                    toast("已恢复雷神账号时长");
                 } else {
-                    format!("恢复返回: {}", res["msg"].as_str().unwrap_or("请先配置官网 Token"))
-                };
-                toast(msg);
+                    toast(&format!("恢复返回: {}", res["msg"].as_str().unwrap_or("请先登录账号")));
+                }
             }
             refresh_account = true;
         }
-        WorkerCmd::SaveToken(tok, auto_pause) => {
+        WorkerCmd::SaveToken { token, auto_pause } => {
             let _ = http_request(
                 "POST",
                 "/api/account/save-token",
-                Some(&json!({"account_token": tok, "auto_pause_on_stop": auto_pause})),
+                Some(&json!({"account_token": token, "auto_pause_on_stop": auto_pause})),
                 12000,
             );
-            toast("已保存凭证并同步本机绑定与账号状态".to_string());
+            toast("已保存凭证并同步本机绑定与账号状态");
             refresh_account = true;
         }
         WorkerCmd::SaveAutoPause(auto_pause) => {
             let _ = http_request("POST", "/api/account/save-token", Some(&json!({"auto_pause_on_stop": auto_pause})), 4000);
-            toast(if auto_pause { "已开启关机自动暂停时长" } else { "已关闭关机自动暂停时长" }.to_string());
+            toast(if auto_pause { "已开启关机自动暂停时长" } else { "已关闭关机自动暂停时长" });
             return;
         }
         WorkerCmd::SaveCustomDns(dns) => {
             let _ = http_request("POST", "/api/account/save-token", Some(&json!({"custom_dns": dns})), 5000);
-            toast(if dns.is_empty() {
-                "已恢复自动使用默认网关 DNS".to_string()
+            if dns.is_empty() {
+                toast("已恢复自动使用默认网关 DNS");
             } else {
-                format!("已保存自定义直连 DNS: {dns}")
-            });
+                toast(&format!("已保存自定义直连 DNS: {dns}"));
+            }
             *known_rev = 0;
             refresh_account = true;
         }
         WorkerCmd::RefreshNodes => {
-            toast("正在从雷神云端拉取最新节点池...".to_string());
+            toast("正在从雷神云端拉取最新节点池...");
             match http_request("POST", "/api/profiles/refresh", Some(&json!({})), 10000) {
                 Ok(res) if res["ok"].as_bool() == Some(true) => {
-                    toast(res["msg"].as_str().unwrap_or("已同步雷神云端最新节点池").to_string());
+                    toast(res["msg"].as_str().unwrap_or("已同步雷神云端最新节点池"));
                 }
-                _ => toast("同步云端节点失败".to_string()),
+                _ => toast("同步云端节点失败"),
             }
             *known_rev = 0;
         }
         WorkerCmd::RestartService => {
-            toast("正在重启加速守护服务...".to_string());
+            toast("正在重启加速守护服务...");
             let _ = http_request("POST", "/api/service-restart", Some(&json!({})), 10000);
             thread::sleep(Duration::from_millis(800));
-            toast("加速守护服务已重启".to_string());
+            toast("加速守护服务已重启");
             refresh_account = true;
         }
         WorkerCmd::RepairBound => {
             let _ = http_request("POST", "/api/device/repair", Some(&json!({})), 6000);
-            toast("已执行设备绑定修复".to_string());
+            toast("已执行设备绑定修复");
             return;
         }
         WorkerCmd::CleanupNet => {
             let _ = http_request("POST", "/api/cleanup-net", Some(&json!({})), 5000);
-            toast("已清理残留防火墙规则".to_string());
+            toast("已清理残留防火墙规则");
         }
     }
 
@@ -277,8 +300,7 @@ fn spawn_worker(cmd_rx: mpsc::Receiver<WorkerCmd>, evt_tx: mpsc::Sender<WorkerEv
                 handle_worker_cmd(cmd, &evt_tx, &mut known_rev);
             }
             if last_poll.elapsed() >= Duration::from_secs(2) {
-                let include_acct = ticks.is_multiple_of(30);
-                if let Some(snap) = fetch_daemon_snapshot(known_rev, include_acct) {
+                if let Some(snap) = fetch_daemon_snapshot(known_rev, ticks.is_multiple_of(30)) {
                     known_rev = snap.profiles_rev;
                     let _ = evt_tx.send(WorkerEvent::Snapshot(Box::new(snap)));
                 }
@@ -307,39 +329,38 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
     header.pack_end(&settings_btn);
 
     let status_icon = gtk::Image::from_icon_name("io.github.asabalazy.leinux-symbolic");
-    status_icon.set_pixel_size(96);
+    status_icon.set_pixel_size(88);
     status_icon.add_css_class("dim-label");
     let status_title = gtk::Label::new(Some("未加速"));
     status_title.add_css_class("title-1");
     let status_sub = gtk::Label::new(Some("非官方的雷神加速器Linux客户端"));
     status_sub.add_css_class("dim-label");
-    status_sub.add_css_class("numeric");
-    let main_btn = gtk::Button::with_label("启动加速");
-    main_btn.add_css_class("pill");
-    main_btn.add_css_class("suggested-action");
-    main_btn.set_halign(gtk::Align::Center);
-    main_btn.set_margin_top(12);
 
-    let hero = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    hero.set_margin_top(18);
-    hero.append(&status_icon);
-    hero.append(&status_title);
-    hero.append(&status_sub);
-    hero.append(&main_btn);
+    let main_btn = gtk::Button::with_label("启动加速");
+    main_btn.set_halign(gtk::Align::Center);
+    main_btn.set_margin_top(6);
+    main_btn.set_css_classes(&["pill", "suggested-action"]);
+
+    let hero = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    hero.set_halign(gtk::Align::Center);
+    hero.set_margin_top(24);
+    hero.set_margin_bottom(8);
+    for w in [status_icon.upcast_ref::<gtk::Widget>(), status_title.upcast_ref(), status_sub.upcast_ref(), main_btn.upcast_ref()] {
+        hero.append(w);
+    }
 
     let region_row = adw::ActionRow::builder().title("区服").activatable(true).build();
     let region_val = gtk::Label::new(Some("未选择"));
     region_val.add_css_class("dim-label");
-    let region_arrow = gtk::Image::from_icon_name("go-next-symbolic");
-    region_arrow.add_css_class("dim-label");
     region_row.add_suffix(&region_val);
-    region_row.add_suffix(&region_arrow);
-    let region_group = adw::PreferencesGroup::builder().title("加速区服").build();
+    region_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    let region_group = adw::PreferencesGroup::new();
     region_group.add(&region_row);
 
-    let speed_history = Rc::new(RefCell::new(Vec::new()));
+    let speed_history = Rc::new(RefCell::new(VecDeque::with_capacity(SPARK_POINTS)));
     let spark = sparkline(speed_history.clone());
-    let (delay_row, delay_val) = value_row("延迟");
+
+    let (delay_row, delay_val) = value_row("节点延迟");
     let (loss_row, loss_val) = value_row("丢包率");
     let (speed_row, speed_val) = value_row("实时速率");
     speed_row.add_suffix(&spark);
@@ -458,11 +479,7 @@ fn build_prefs_dialog() -> PrefsWidgets {
     }
 }
 
-fn build_region_dialog(
-    state: Rc<RefCell<GuiState>>,
-    mw: MainWidgets,
-    cmd_tx: mpsc::Sender<WorkerCmd>,
-) -> (adw::Dialog, Rc<dyn Fn()>) {
+fn build_region_picker() -> RegionPicker {
     let dialog = adw::Dialog::builder()
         .title("选择加速区服")
         .content_width(480)
@@ -496,132 +513,14 @@ fn build_region_dialog(
     view.set_content(Some(&vbox));
     dialog.set_child(Some(&view));
 
-    let rebuild_list: Rc<dyn Fn()> = {
-        let state = state.clone();
-        let list_box = list_box.clone();
-        let dlg = dialog.clone();
-        Rc::new(move || {
-            while let Some(child) = list_box.first_child() {
-                list_box.remove(&child);
-            }
-            let st = state.borrow();
-            for &cont in &CONTINENT_ORDER {
-                if !st.continent_filter.is_empty() && st.continent_filter != cont {
-                    continue;
-                }
-                let items: Vec<ProfileSummary> = st
-                    .profiles
-                    .iter()
-                    .filter(|p| p.continent == cont)
-                    .cloned()
-                    .collect();
-                if items.is_empty() {
-                    continue;
-                }
-                let grp = adw::PreferencesGroup::builder().title(cont).build();
-                for prof in items {
-                    let row = adw::ActionRow::builder()
-                        .title(&prof.name)
-                        .subtitle(format!("{} · {} 个云端入口节点", prof.area.to_uppercase(), prof.node_count))
-                        .activatable(true)
-                        .build();
-                    if prof.area == st.selected_area {
-                        let chk = gtk::Image::from_icon_name("object-select-symbolic");
-                        chk.add_css_class("accent");
-                        row.add_suffix(&chk);
-                    }
-                    let state = state.clone();
-                    let mw = mw.clone();
-                    let dlg = dlg.clone();
-                    let tx = cmd_tx.clone();
-                    row.connect_activated(move |_| {
-                        let (should_switch, area, name) = {
-                            let mut s = state.borrow_mut();
-                            s.selected_area = prof.area.clone();
-                            mw.update_region_label(&s);
-                            mw.refresh_hero(&s);
-                            (
-                                s.snap.is_accelerating && s.snap.active_area != prof.area,
-                                prof.area.clone(),
-                                prof.name.clone(),
-                            )
-                        };
-                        dlg.close();
-                        let _ = tx.send(WorkerCmd::SaveLastArea(area.clone()));
-                        if should_switch {
-                            let _ = tx.send(WorkerCmd::StartArea(area, name));
-                        }
-                    });
-                    grp.add(&row);
-                }
-                list_box.append(&grp);
-            }
-        })
-    };
-
-    let rebuild: Rc<dyn Fn()> = {
-        let state = state.clone();
-        let filter_bar = filter_bar.clone();
-        let rebuild_list = rebuild_list.clone();
-        Rc::new(move || {
-            while let Some(child) = filter_bar.first_child() {
-                filter_bar.remove(&child);
-            }
-            let active_filter = {
-                let mut st = state.borrow_mut();
-                if !st.continent_filter.is_empty()
-                    && !st.profiles.iter().any(|p| p.continent == st.continent_filter)
-                {
-                    st.continent_filter.clear();
-                }
-                st.continent_filter.clone()
-            };
-
-            let mut tabs: Vec<(&str, &str)> = vec![("全部", "")];
-            {
-                let st = state.borrow();
-                for &cont in &CONTINENT_ORDER {
-                    if st.profiles.iter().any(|p| p.continent == cont) {
-                        tabs.push((cont, cont));
-                    }
-                }
-            }
-
-            let mut first_btn: Option<gtk::ToggleButton> = None;
-            for (label, cont_val) in tabs {
-                let b = gtk::ToggleButton::with_label(label);
-                if let Some(ref f) = first_btn {
-                    b.set_group(Some(f));
-                } else {
-                    first_btn = Some(b.clone());
-                }
-                if cont_val == active_filter {
-                    b.set_active(true);
-                }
-                let state = state.clone();
-                let rebuild_list = rebuild_list.clone();
-                let cont_str = cont_val.to_string();
-                b.connect_toggled(move |btn| {
-                    if btn.is_active() {
-                        state.borrow_mut().continent_filter = cont_str.clone();
-                        rebuild_list();
-                    }
-                });
-                filter_bar.append(&b);
-            }
-            rebuild_list();
-        })
-    };
-
-    (dialog, rebuild)
+    RegionPicker { dialog, filter_bar, list_box }
 }
 
 impl MainWidgets {
     fn update_region_label(&self, st: &GuiState) {
-        if let Some(p) = st.selected_profile() {
-            self.region_val.set_text(&format!("{} · {}", p.continent, p.name));
-        } else {
-            self.region_val.set_text("未选择");
+        match st.selected_profile() {
+            Some(p) => self.region_val.set_text(&format!("{} · {}", p.continent, p.name)),
+            None => self.region_val.set_text("未选择"),
         }
     }
 
@@ -632,9 +531,8 @@ impl MainWidgets {
                 .profiles
                 .iter()
                 .find(|p| p.area == st.snap.active_area)
-                .map(|p| p.name.as_str())
-                .unwrap_or(&st.snap.active_area);
-            let secs = st.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                .map_or(st.snap.active_area.as_str(), |p| p.name.as_str());
+            let secs = st.started_at.map_or(0, |t| t.elapsed().as_secs());
             self.status_icon.set_css_classes(&["accent"]);
             self.status_title.set_text(name);
             self.status_sub.set_text(&format!("加速中 · {}", format_hms(secs)));
@@ -646,6 +544,44 @@ impl MainWidgets {
             self.status_sub.set_text("非官方的雷神加速器Linux客户端");
             self.main_btn.set_label("启动加速");
             self.main_btn.set_css_classes(&["pill", "suggested-action"]);
+        }
+    }
+
+    fn update_traffic(&self, st: &mut GuiState, snap: &DaemonSnapshot) {
+        let now = Instant::now();
+        if let Some((prx, ptx, pts)) = st.last_sample {
+            let dt = now.duration_since(pts).as_secs_f64();
+            if dt > 0.1 {
+                let rx = snap.rx_bytes.saturating_sub(prx) as f64 / dt;
+                let tx = snap.tx_bytes.saturating_sub(ptx) as f64 / dt;
+                self.speed_val.set_text(&format!("↓ {}/s  ↑ {}/s", format_bytes(rx, 0), format_bytes(tx, 0)));
+                let mut h = self.speed_history.borrow_mut();
+                if h.len() >= SPARK_POINTS {
+                    h.pop_front();
+                }
+                h.push_back(rx + tx);
+                drop(h);
+                self.spark.queue_draw();
+            }
+        }
+        st.last_sample = Some((snap.rx_bytes, snap.tx_bytes, now));
+        self.total_val.set_text(&format_bytes((snap.rx_bytes + snap.tx_bytes) as f64, 1));
+        self.iface_val.set_text(&format!("{} · {}", snap.traffic_iface, snap.udp_6066));
+    }
+
+    fn update_account_section(&self, acct: &AccountSnapshot) {
+        if acct.configured {
+            self.acct_row.set_title(&format!("{} 小时 {} 分", acct.hours, acct.mins));
+            self.acct_row.set_subtitle(&format!(
+                "{} · {}",
+                acct.sub_text,
+                if acct.paused { "已暂停" } else { "计时中" }
+            ));
+            self.acct_btn.set_label(if acct.paused { "恢复时长" } else { "暂停时长" });
+        } else {
+            self.acct_row.set_title("未登录雷神账号");
+            self.acct_row.set_subtitle("点击右侧一键弹出登录小窗口，自动完成绑定与同步");
+            self.acct_btn.set_label("登录账号");
         }
     }
 
@@ -663,25 +599,7 @@ impl MainWidgets {
             format!("服务异常（{}）", snap.service_state)
         });
 
-        let now = Instant::now();
-        if let Some((prx, ptx, pts)) = st.last_sample {
-            let dt = now.duration_since(pts).as_secs_f64();
-            if dt > 0.1 {
-                let rx = snap.rx_bytes.saturating_sub(prx) as f64 / dt;
-                let tx = snap.tx_bytes.saturating_sub(ptx) as f64 / dt;
-                self.speed_val.set_text(&format!("↓ {}/s  ↑ {}/s", format_bytes(rx, 0), format_bytes(tx, 0)));
-                let mut h = self.speed_history.borrow_mut();
-                h.push(rx + tx);
-                if h.len() > SPARK_POINTS {
-                    h.remove(0);
-                }
-                drop(h);
-                self.spark.queue_draw();
-            }
-        }
-        st.last_sample = Some((snap.rx_bytes, snap.tx_bytes, now));
-        self.total_val.set_text(&format_bytes((snap.rx_bytes + snap.tx_bytes) as f64, 1));
-        self.iface_val.set_text(&format!("{} · {}", snap.traffic_iface, snap.udp_6066));
+        self.update_traffic(st, &snap);
 
         if snap.is_accelerating && !snap.active_area.is_empty() {
             st.selected_area = snap.active_area.clone();
@@ -698,9 +616,7 @@ impl MainWidgets {
         }
 
         if snap.is_accelerating {
-            if st.started_at.is_none() {
-                st.started_at = Some(Instant::now());
-            }
+            st.started_at.get_or_insert_with(Instant::now);
             self.delay_val.set_text(&if snap.net_delay > 0 { format!("{} ms", snap.net_delay) } else { "—".into() });
             self.loss_val.set_text(&format!("{} %", snap.loss_rate));
         } else {
@@ -709,20 +625,7 @@ impl MainWidgets {
             self.loss_val.set_text("—");
         }
 
-        if st.account.configured {
-            self.acct_row.set_title(&format!("{} 小时 {} 分", st.account.hours, st.account.mins));
-            self.acct_row.set_subtitle(&format!(
-                "{} · {}",
-                st.account.sub_text,
-                if st.account.paused { "已暂停" } else { "计时中" }
-            ));
-            self.acct_btn.set_label(if st.account.paused { "恢复时长" } else { "暂停时长" });
-        } else {
-            self.acct_row.set_title("未登录雷神账号");
-            self.acct_row.set_subtitle("点击右侧一键弹出登录小窗口，自动完成绑定与同步");
-            self.acct_btn.set_label("登录账号");
-        }
-
+        self.update_account_section(&st.account);
         pw.auto_pause_row.set_active(st.account.auto_pause_on_stop);
         let gw_dns = if st.account.detected_gateway_dns.is_empty() {
             "223.5.5.5:53"
@@ -740,6 +643,227 @@ impl MainWidgets {
     }
 }
 
+impl UiCtx {
+    fn send(&self, cmd: WorkerCmd) {
+        let _ = self.cmd_tx.send(cmd);
+    }
+
+    fn toast(&self, msg: &str) {
+        let t = adw::Toast::new(msg);
+        if self.pw.dialog.is_mapped() {
+            self.pw.dialog.add_toast(t);
+        } else {
+            self.mw.toasts.add_toast(t);
+        }
+    }
+
+    fn rebuild_region_list(&self) {
+        clear_box(&self.picker.list_box);
+        let st = self.state.borrow();
+        for &cont in &CONTINENT_ORDER {
+            if !st.continent_filter.is_empty() && st.continent_filter != cont {
+                continue;
+            }
+            let items: Vec<ProfileSummary> = st
+                .profiles
+                .iter()
+                .filter(|p| p.continent == cont)
+                .cloned()
+                .collect();
+            if items.is_empty() {
+                continue;
+            }
+            let grp = adw::PreferencesGroup::builder().title(cont).build();
+            for prof in items {
+                let row = adw::ActionRow::builder()
+                    .title(&prof.name)
+                    .subtitle(format!("{} · {} 个云端入口节点", prof.area.to_uppercase(), prof.node_count))
+                    .activatable(true)
+                    .build();
+                if prof.area == st.selected_area {
+                    let chk = gtk::Image::from_icon_name("object-select-symbolic");
+                    chk.add_css_class("accent");
+                    row.add_suffix(&chk);
+                }
+                let ctx = self.clone();
+                row.connect_activated(move |_| ctx.select_region(&prof.area, &prof.name));
+                grp.add(&row);
+            }
+            self.picker.list_box.append(&grp);
+        }
+    }
+
+    fn rebuild_region_picker(&self) {
+        clear_box(&self.picker.filter_bar);
+        let active_filter = {
+            let mut st = self.state.borrow_mut();
+            if !st.continent_filter.is_empty()
+                && !st.profiles.iter().any(|p| p.continent == st.continent_filter)
+            {
+                st.continent_filter.clear();
+            }
+            st.continent_filter.clone()
+        };
+
+        let mut tabs = vec![("全部", "")];
+        {
+            let st = self.state.borrow();
+            tabs.extend(
+                CONTINENT_ORDER
+                    .iter()
+                    .copied()
+                    .filter(|&cont| st.profiles.iter().any(|p| p.continent == cont))
+                    .map(|cont| (cont, cont)),
+            );
+        }
+
+        let mut first_btn: Option<gtk::ToggleButton> = None;
+        for (label, cont_val) in tabs {
+            let b = gtk::ToggleButton::with_label(label);
+            if let Some(ref f) = first_btn {
+                b.set_group(Some(f));
+            } else {
+                first_btn = Some(b.clone());
+            }
+            b.set_active(cont_val == active_filter);
+            let ctx = self.clone();
+            let cont_str = cont_val.to_string();
+            b.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    ctx.state.borrow_mut().continent_filter = cont_str.clone();
+                    ctx.rebuild_region_list();
+                }
+            });
+            self.picker.filter_bar.append(&b);
+        }
+        self.rebuild_region_list();
+    }
+
+    fn open_region_picker(&self) {
+        self.rebuild_region_picker();
+        self.picker.dialog.present(Some(&self.mw.win));
+    }
+
+    fn select_region(&self, area: &str, name: &str) {
+        let should_switch = {
+            let mut st = self.state.borrow_mut();
+            st.selected_area = area.to_string();
+            self.mw.update_region_label(&st);
+            self.mw.refresh_hero(&st);
+            st.snap.is_accelerating && st.snap.active_area != area
+        };
+        self.picker.dialog.close();
+        self.send(WorkerCmd::SaveLastArea(area.to_string()));
+        if should_switch {
+            self.send(WorkerCmd::StartArea { area: area.to_string(), name: name.to_string() });
+        }
+    }
+
+    fn on_main_clicked(&self) {
+        let cmd = {
+            let st = self.state.borrow();
+            if st.snap.is_accelerating {
+                Some(WorkerCmd::PauseAccount)
+            } else {
+                st.selected_profile()
+                    .map(|p| WorkerCmd::StartArea { area: p.area.clone(), name: p.name.clone() })
+            }
+        };
+        match cmd {
+            Some(c) => self.send(c),
+            None => {
+                self.toast("请先选择加速区服");
+                self.open_region_picker();
+            }
+        }
+    }
+
+    fn start_popup_login(&self, open_prefs_on_missing_browser: bool) {
+        if find_chromium_binary().is_none() {
+            self.toast("未检测到 Chrome / Chromium / Edge 浏览器，请手动填入 Token");
+            if open_prefs_on_missing_browser {
+                self.pw.dialog.present(Some(&self.mw.win));
+            }
+            return;
+        }
+        let auto_pause = self.pw.auto_pause_row.is_active();
+        let tx = self.cmd_tx.clone();
+        let evt_tx = self.evt_tx.clone();
+        self.toast("正在打开雷神登录小窗口，登录成功后将自动关闭...");
+        thread::spawn(move || match run_browser_login_popup() {
+            Ok(token) => {
+                let _ = evt_tx.send(WorkerEvent::Toast("已自动获取凭证，正在绑定设备并同步账号...".to_string()));
+                let _ = tx.send(WorkerCmd::SaveToken { token, auto_pause });
+            }
+            Err(msg) => {
+                let _ = evt_tx.send(WorkerEvent::Toast(msg));
+            }
+        });
+    }
+
+    fn on_account_clicked(&self) {
+        let (configured, paused) = {
+            let st = self.state.borrow();
+            (st.account.configured, st.account.paused)
+        };
+        if !configured {
+            self.start_popup_login(true);
+        } else if paused {
+            self.send(WorkerCmd::RecoverAccount);
+        } else {
+            self.send(WorkerCmd::PauseAccount);
+        }
+    }
+
+    fn bind_signals(&self) {
+        let c = self.clone();
+        self.mw.settings_btn.connect_clicked(move |_| c.pw.dialog.present(Some(&c.mw.win)));
+
+        let c = self.clone();
+        self.mw.region_row.connect_activated(move |_| c.open_region_picker());
+
+        let c = self.clone();
+        self.mw.main_btn.connect_clicked(move |_| c.on_main_clicked());
+
+        let c = self.clone();
+        self.mw.acct_btn.connect_clicked(move |_| c.on_account_clicked());
+
+        let c = self.clone();
+        self.pw.login_btn.connect_clicked(move |_| c.start_popup_login(false));
+
+        let c = self.clone();
+        self.pw.token_row.connect_apply(move |row| {
+            let token = row.text().trim().to_string();
+            row.set_text("");
+            c.send(WorkerCmd::SaveToken { token, auto_pause: c.pw.auto_pause_row.is_active() });
+        });
+
+        let c = self.clone();
+        self.pw.auto_pause_row.connect_active_notify(move |row| {
+            if !c.suppress.get() {
+                c.send(WorkerCmd::SaveAutoPause(row.is_active()));
+            }
+        });
+
+        let c = self.clone();
+        self.pw.dns_entry.connect_apply(move |row| {
+            c.send(WorkerCmd::SaveCustomDns(row.text().trim().to_string()));
+        });
+
+        let c = self.clone();
+        self.pw.refresh_nodes_btn.connect_clicked(move |_| c.send(WorkerCmd::RefreshNodes));
+
+        let c = self.clone();
+        self.pw.restart_btn.connect_clicked(move |_| c.send(WorkerCmd::RestartService));
+
+        let c = self.clone();
+        self.pw.repair_btn.connect_clicked(move |_| c.send(WorkerCmd::RepairBound));
+
+        let c = self.clone();
+        self.pw.cleanup_btn.connect_clicked(move |_| c.send(WorkerCmd::CleanupNet));
+    }
+}
+
 pub fn run_gui() {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
@@ -752,183 +876,36 @@ fn build_ui(app: &adw::Application) {
         return;
     }
 
-    let mw = build_main_window(app);
-    let pw = build_prefs_dialog();
-    let state = Rc::new(RefCell::new(GuiState::default()));
-    let suppress = Rc::new(Cell::new(false));
-
     let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCmd>();
     let (evt_tx, evt_rx) = mpsc::channel::<WorkerEvent>();
     spawn_worker(cmd_rx, evt_tx.clone());
 
-    let (region_dialog, rebuild_region_dialog) =
-        build_region_dialog(state.clone(), mw.clone(), cmd_tx.clone());
-
-    let toast = {
-        let toasts = mw.toasts.clone();
-        let prefs = pw.dialog.clone();
-        Rc::new(move |msg: &str| {
-            let t = adw::Toast::new(msg);
-            if prefs.is_mapped() { prefs.add_toast(t); } else { toasts.add_toast(t); }
-        })
+    let ctx = UiCtx {
+        state: Rc::new(RefCell::new(GuiState::default())),
+        suppress: Rc::new(Cell::new(false)),
+        mw: build_main_window(app),
+        pw: build_prefs_dialog(),
+        picker: build_region_picker(),
+        cmd_tx,
+        evt_tx,
     };
+    ctx.bind_signals();
 
-    {
-        let (prefs, win) = (pw.dialog.clone(), mw.win.clone());
-        mw.settings_btn.connect_clicked(move |_| prefs.present(Some(&win)));
-    }
-    {
-        let (dlg, win, rebuild) = (region_dialog.clone(), mw.win.clone(), rebuild_region_dialog.clone());
-        mw.region_row.connect_activated(move |_| {
-            rebuild();
-            dlg.present(Some(&win));
-        });
-    }
-    {
-        let (tx, st) = (cmd_tx.clone(), state.clone());
-        let (dlg, win, rebuild, toast) = (
-            region_dialog.clone(),
-            mw.win.clone(),
-            rebuild_region_dialog.clone(),
-            toast.clone(),
-        );
-        mw.main_btn.connect_clicked(move |_| {
-            let action = {
-                let cur = st.borrow();
-                if cur.snap.is_accelerating {
-                    Some(WorkerCmd::PauseAccount)
-                } else {
-                    cur.selected_profile()
-                        .map(|p| WorkerCmd::StartArea(p.area.clone(), p.name.clone()))
-                }
-            };
-            if let Some(cmd) = action {
-                let _ = tx.send(cmd);
-            } else {
-                toast("请先选择加速区服");
-                rebuild();
-                dlg.present(Some(&win));
-            }
-        });
-    }
-    let start_popup_login = {
-        let tx = cmd_tx.clone();
-        let evt_tx = evt_tx.clone();
-        let sw = pw.auto_pause_row.clone();
-        let prefs = pw.dialog.clone();
-        let win = mw.win.clone();
-        Rc::new(move |open_prefs_on_missing_browser: bool| {
-            if find_chromium_binary().is_none() {
-                let _ = evt_tx.send(WorkerEvent::Toast(
-                    "未检测到 Chrome / Chromium / Edge 浏览器，请手动填入 Token".to_string(),
-                ));
-                if open_prefs_on_missing_browser {
-                    prefs.present(Some(&win));
-                }
-                return;
-            }
-            let auto_pause = sw.is_active();
-            let tx = tx.clone();
-            let evt_tx = evt_tx.clone();
-            let _ = evt_tx.send(WorkerEvent::Toast("正在打开雷神登录小窗口，登录成功后将自动关闭...".to_string()));
-            thread::spawn(move || match run_browser_login_popup() {
-                Ok(ptok) => {
-                    let _ = evt_tx.send(WorkerEvent::Toast("已自动获取凭证，正在绑定设备并同步账号...".to_string()));
-                    let _ = tx.send(WorkerCmd::SaveToken(ptok, auto_pause));
-                }
-                Err(msg) => {
-                    let _ = evt_tx.send(WorkerEvent::Toast(msg));
-                }
-            });
-        })
-    };
-
-    {
-        let (tx, st) = (cmd_tx.clone(), state.clone());
-        let login = start_popup_login.clone();
-        mw.acct_btn.connect_clicked(move |_| {
-            let (configured, paused) = {
-                let cur = st.borrow();
-                (cur.account.configured, cur.account.paused)
-            };
-            if !configured {
-                login(true);
-            } else if paused {
-                let _ = tx.send(WorkerCmd::RecoverAccount);
-            } else {
-                let _ = tx.send(WorkerCmd::PauseAccount);
-            }
-        });
-    }
-    {
-        let login = start_popup_login.clone();
-        pw.login_btn.connect_clicked(move |_| login(false));
-    }
-    {
-        let (tx, sw) = (cmd_tx.clone(), pw.auto_pause_row.clone());
-        pw.token_row.connect_apply(move |row| {
-            let tok = row.text().trim().to_string();
-            row.set_text("");
-            let _ = tx.send(WorkerCmd::SaveToken(tok, sw.is_active()));
-        });
-    }
-    {
-        let (tx, sup) = (cmd_tx.clone(), suppress.clone());
-        pw.auto_pause_row.connect_active_notify(move |row| {
-            if !sup.get() {
-                let _ = tx.send(WorkerCmd::SaveAutoPause(row.is_active()));
-            }
-        });
-    }
-    {
-        let tx = cmd_tx.clone();
-        pw.dns_entry.connect_apply(move |row| {
-            let _ = tx.send(WorkerCmd::SaveCustomDns(row.text().trim().to_string()));
-        });
-    }
-    {
-        let tx = cmd_tx.clone();
-        pw.refresh_nodes_btn.connect_clicked(move |_| {
-            let _ = tx.send(WorkerCmd::RefreshNodes);
-        });
-    }
-    {
-        let tx = cmd_tx.clone();
-        pw.restart_btn.connect_clicked(move |_| {
-            let _ = tx.send(WorkerCmd::RestartService);
-        });
-    }
-    {
-        let tx = cmd_tx.clone();
-        pw.repair_btn.connect_clicked(move |_| {
-            let _ = tx.send(WorkerCmd::RepairBound);
-        });
-    }
-    {
-        let tx = cmd_tx.clone();
-        pw.cleanup_btn.connect_clicked(move |_| {
-            let _ = tx.send(WorkerCmd::CleanupNet);
-        });
-    }
-
-    let mw_loop = mw.clone();
+    let loop_ctx = ctx.clone();
     glib::timeout_add_local(Duration::from_millis(250), move || {
-        {
-            let st = state.borrow();
-            if st.started_at.is_some() {
-                mw_loop.refresh_hero(&st);
-            }
+        if loop_ctx.state.borrow().started_at.is_some() {
+            loop_ctx.mw.refresh_hero(&loop_ctx.state.borrow());
         }
         while let Ok(evt) = evt_rx.try_recv() {
             match evt {
-                WorkerEvent::Toast(msg) => toast(&msg),
+                WorkerEvent::Toast(msg) => loop_ctx.toast(&msg),
                 WorkerEvent::Snapshot(snap) => {
                     let profiles_updated = snap.profiles.is_some();
-                    suppress.set(true);
-                    mw_loop.apply_snapshot(&pw, &mut state.borrow_mut(), *snap);
-                    suppress.set(false);
-                    if profiles_updated && region_dialog.is_mapped() {
-                        rebuild_region_dialog();
+                    loop_ctx.suppress.set(true);
+                    loop_ctx.mw.apply_snapshot(&loop_ctx.pw, &mut loop_ctx.state.borrow_mut(), *snap);
+                    loop_ctx.suppress.set(false);
+                    if profiles_updated && loop_ctx.picker.dialog.is_mapped() {
+                        loop_ctx.rebuild_region_picker();
                     }
                 }
             }
@@ -936,5 +913,5 @@ fn build_ui(app: &adw::Application) {
         glib::ControlFlow::Continue
     });
 
-    mw.win.present();
+    ctx.mw.win.present();
 }

@@ -8,9 +8,9 @@ use crate::profiles::{
     scan_profiles,
 };
 use crate::rpc::{
-    ensure_router_bound, exchange_ptoken_for_web_token, fetch_account_snapshot, is_valid_ptoken,
-    load_account_config, pause_account_time, query_active_acc_state, resolve_p_token,
-    save_account_config, webapi_post_with_auto_renew, ws_rpc_call,
+    core_rpc, ensure_router_bound, fetch_account_snapshot, is_valid_ptoken, load_account_config,
+    pause_account_time, query_active_acc_state, refresh_web_token, resolve_p_token,
+    save_account_config, webapi_post_with_auto_renew,
 };
 use crate::types::{DaemonSnapshot, ProfileSummary};
 use crate::{load_host_port, CORE_SERVICE};
@@ -51,7 +51,7 @@ fn send_json<T: Serialize>(mut stream: TcpStream, status: u16, val: &T) {
 fn parse_query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
-        if k == key { Some(v) } else { None }
+        (k == key).then_some(v)
     })
 }
 
@@ -65,17 +65,13 @@ fn build_daemon_snapshot(known_rev: u64, include_account: bool) -> DaemonSnapsho
         ("未创建 (开启加速后生成)".to_string(), "tun_PC".to_string(), 0, 0)
     };
 
-    let (version, token, _) = read_ini_values();
+    let ini = read_ini_values();
     let (stored_profiles, rev) = scan_profiles();
-    let (is_accelerating, active_area, net_delay, loss_rate) = query_active_acc_state(&token);
+    let acc = query_active_acc_state(&ini.rtoken);
     let last_area = load_account_config().last_area;
 
-    let profiles = if known_rev == rev && known_rev != 0 {
-        None
-    } else {
-        Some(stored_profiles.into_iter().map(|p| p.summary).collect::<Vec<ProfileSummary>>())
-    };
-    let account = if include_account { Some(fetch_account_snapshot()) } else { None };
+    let profiles = (known_rev != rev || known_rev == 0)
+        .then(|| stored_profiles.into_iter().map(|p| p.summary).collect::<Vec<ProfileSummary>>());
 
     DaemonSnapshot {
         service_active,
@@ -85,15 +81,15 @@ fn build_daemon_snapshot(known_rev: u64, include_account: bool) -> DaemonSnapsho
         rx_bytes,
         tx_bytes,
         udp_6066: probe_udp_6066().to_string(),
-        version,
-        is_accelerating,
-        active_area,
+        version: ini.version,
+        is_accelerating: acc.is_accelerating,
+        active_area: acc.active_area,
         last_area,
-        net_delay,
-        loss_rate,
+        net_delay: acc.net_delay,
+        loss_rate: acc.loss_rate,
         profiles_rev: rev,
         profiles,
-        account,
+        account: include_account.then(fetch_account_snapshot),
     }
 }
 
@@ -106,26 +102,16 @@ fn wait_for_tun_ready() {
     }
 }
 
-fn execute_start_for_conf(
-    mut rtoken: String,
-    catalog: i64,
-    sub_catalog: i64,
-    raw_conf: &Value,
-) -> Result<Value, String> {
+fn execute_start_for_conf(catalog: i64, sub_catalog: i64, raw_conf: &Value) -> Result<Value, String> {
     set_stop_enforced(false);
     let acct_cfg = load_account_config();
     let p_tok = resolve_p_token(&acct_cfg);
-    if !p_tok.is_empty() && ensure_router_bound(&p_tok, &acct_cfg.user_id, false) {
-        let (_, new_rtok, _) = read_ini_values();
-        if !new_rtok.is_empty() {
-            rtoken = new_rtok;
-        }
+    if !p_tok.is_empty() {
+        let _ = ensure_router_bound(&p_tok, &acct_cfg.user_id, false);
     }
-    let (_, ini_rtok, ini_uid) = read_ini_values();
-    if rtoken.is_empty() {
-        rtoken = ini_rtok;
-    }
-    let uid = if !acct_cfg.user_id.trim().is_empty() { &acct_cfg.user_id } else { &ini_uid };
+
+    let ini = read_ini_values();
+    let uid = if !acct_cfg.user_id.trim().is_empty() { &acct_cfg.user_id } else { &ini.user_id };
 
     let dns_list = resolve_local_dns_list(&acct_cfg.custom_dns);
     let (sanitized, _) = sanitize_acc_conf(raw_conf, &dns_list);
@@ -138,22 +124,16 @@ fn execute_start_for_conf(
     let live_conf = prepare_live_conf(sanitized, &p_tok, uid);
 
     install_mangle_guard();
-    let req = json!({
-        "cmd": "STARTACC",
-        "tag": "daemon-start",
-        "sn": "",
-        "cli": "leinux",
-        "code": 0,
-        "err": "",
-        "data": {
-            "token": rtoken,
+    let resp = core_rpc(
+        "STARTACC",
+        json!({
+            "token": ini.rtoken,
             "catalog": catalog,
             "subCatalog": sub_catalog,
             "conf": live_conf,
-        }
-    });
-
-    let resp = ws_rpc_call("127.0.0.1", 5588, "/ws", &req, 5000)?;
+        }),
+        5000,
+    )?;
     if resp["code"].as_i64() == Some(0) {
         wait_for_tun_ready();
     }
@@ -189,8 +169,7 @@ fn handle_acc_start(req_json: &Value) -> (u16, Value) {
         let _ = webapi_post_with_auto_renew("/api/user/recover");
     }
 
-    let (_, rtoken, _) = read_ini_values();
-    match execute_start_for_conf(rtoken, prof.summary.catalog, prof.summary.sub_catalog, &prof.conf) {
+    match execute_start_for_conf(prof.summary.catalog, prof.summary.sub_catalog, &prof.conf) {
         Ok(resp) if resp["code"].as_i64() == Some(0) => (
             200,
             json!({
@@ -211,17 +190,8 @@ fn handle_device_repair() -> (u16, Value) {
     if !p_tok.is_empty() {
         let _ = ensure_router_bound(&p_tok, &cfg.user_id, true);
     }
-    let (_, rtoken, uid) = read_ini_values();
-    let req = json!({
-        "cmd": "AUTOREPAIRBOUND",
-        "tag": "repair",
-        "sn": "",
-        "cli": "leinux",
-        "code": 0,
-        "err": "",
-        "data": {"rToken": rtoken, "userId": uid},
-    });
-    match ws_rpc_call("127.0.0.1", 5588, "/ws", &req, 5000) {
+    let ini = read_ini_values();
+    match core_rpc("AUTOREPAIRBOUND", json!({"rToken": ini.rtoken, "userId": ini.user_id}), 5000) {
         Ok(resp) => (200, resp),
         Err(e) => (502, json!({"code": -1, "err": format!("连接 127.0.0.1:5588/ws 失败: {e}")})),
     }
@@ -235,10 +205,9 @@ fn extract_raw_token(input: &str) -> String {
     serde_json::from_str::<Value>(trimmed)
         .ok()
         .and_then(|v| {
-            v["account_token"]
-                .as_str()
-                .or_else(|| v["p_token"].as_str())
-                .or_else(|| v["token"].as_str())
+            ["account_token", "p_token", "token"]
+                .into_iter()
+                .find_map(|k| v[k].as_str())
                 .map(str::to_string)
         })
         .unwrap_or_else(|| trimmed.to_string())
@@ -247,25 +216,23 @@ fn extract_raw_token(input: &str) -> String {
 fn handle_save_token(req_json: &Value) -> Value {
     let mut cfg = load_account_config();
     let mut need_web_check = false;
-    if let Some(raw_tok) = req_json["account_token"].as_str() {
-        let tok = extract_raw_token(raw_tok);
-        if !tok.is_empty() {
-            need_web_check = true;
-            if is_valid_ptoken(&tok) {
-                cfg.p_token = tok.clone();
-                if let Some((web_tok, uid)) = exchange_ptoken_for_web_token(&tok) {
-                    cfg.account_token = web_tok;
-                    if !uid.is_empty() {
-                        cfg.user_id = uid.clone();
-                        let _ = ensure_router_bound(&tok, &uid, false);
-                    }
-                }
-            } else {
-                cfg.account_token = tok;
-                let p_tok = resolve_p_token(&cfg);
-                if !p_tok.is_empty() {
-                    cfg.p_token = p_tok;
-                }
+
+    if let Some(tok) = req_json["account_token"]
+        .as_str()
+        .map(extract_raw_token)
+        .filter(|t| !t.is_empty())
+    {
+        need_web_check = true;
+        if is_valid_ptoken(&tok) {
+            cfg.p_token = tok.clone();
+            if refresh_web_token(&mut cfg, &tok).is_some() && !cfg.user_id.is_empty() {
+                let _ = ensure_router_bound(&tok, &cfg.user_id, false);
+            }
+        } else {
+            cfg.account_token = tok;
+            let p_tok = resolve_p_token(&cfg);
+            if !p_tok.is_empty() {
+                cfg.p_token = p_tok;
             }
         }
     }
@@ -275,12 +242,11 @@ fn handle_save_token(req_json: &Value) -> Value {
     if let Some(la) = req_json.get("last_area").and_then(Value::as_str) {
         cfg.last_area = la.trim().to_lowercase();
     }
-    let dns_changed = if let Some(cdns) = req_json.get("custom_dns").and_then(Value::as_str) {
-        cfg.custom_dns = cdns.trim().to_string();
-        true
-    } else {
-        false
-    };
+    let dns_changed = req_json
+        .get("custom_dns")
+        .and_then(Value::as_str)
+        .map(|cdns| cfg.custom_dns = cdns.trim().to_string())
+        .is_some();
 
     save_account_config(&cfg);
     if need_web_check || dns_changed {
@@ -304,25 +270,35 @@ fn handle_save_token(req_json: &Value) -> Value {
     })
 }
 
-fn handle_client(stream: TcpStream) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+enum HttpReadResult {
+    Ok {
+        method: String,
+        path: String,
+        query: String,
+        body: Value,
+    },
+    TooLarge,
+    Invalid,
+}
 
-    let Ok(cloned) = stream.try_clone() else { return };
+fn read_http_request(stream: &TcpStream) -> HttpReadResult {
+    let Ok(cloned) = stream.try_clone() else { return HttpReadResult::Invalid };
     let mut reader = BufReader::new(cloned);
 
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
-        return;
+        return HttpReadResult::Invalid;
     }
     let mut parts = request_line.split_whitespace();
-    let (Some(method), Some(raw_target)) = (parts.next(), parts.next()) else { return };
+    let (Some(method), Some(raw_target)) = (parts.next(), parts.next()) else {
+        return HttpReadResult::Invalid;
+    };
     let (path, query) = raw_target.split_once('?').unwrap_or((raw_target, ""));
 
     let mut content_length: usize = 0;
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line).is_err() || line == "\r\n" || line == "\n" || line.is_empty() {
+        if reader.read_line(&mut line).is_err() || matches!(line.as_str(), "" | "\n" | "\r\n") {
             break;
         }
         if let Some((k, v)) = line.split_once(':') {
@@ -333,49 +309,56 @@ fn handle_client(stream: TcpStream) {
     }
 
     if content_length > MAX_BODY_BYTES {
-        send_json(stream, 413, &json!({"error": "Payload too large"}));
-        return;
+        return HttpReadResult::TooLarge;
     }
     let mut body_bytes = vec![0u8; content_length];
     if content_length > 0 && reader.read_exact(&mut body_bytes).is_err() {
-        return;
+        return HttpReadResult::Invalid;
     }
-
-    if method == "GET" {
-        match path {
-            "/api/status" => {
-                let known_rev = parse_query_param(query, "known_rev")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                let include_acct = parse_query_param(query, "include_account") == Some("1");
-                send_json(stream, 200, &build_daemon_snapshot(known_rev, include_acct));
-            }
-            _ => send_json(stream, 404, &json!({"error": "Not found"})),
-        }
-        return;
-    }
-
-    if method != "POST" {
-        send_json(stream, 404, &json!({"error": "Method not allowed"}));
-        return;
-    }
-
-    let req_json: Value = if body_bytes.is_empty() {
+    let body = if body_bytes.is_empty() {
         json!({})
     } else {
         serde_json::from_slice(&body_bytes).unwrap_or_else(|_| json!({}))
     };
 
-    match path {
-        "/api/acc/start" => {
+    HttpReadResult::Ok {
+        method: method.to_string(),
+        path: path.to_string(),
+        query: query.to_string(),
+        body,
+    }
+}
+
+fn handle_client(stream: TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+
+    let (method, path, query, req_json) = match read_http_request(&stream) {
+        HttpReadResult::Ok { method, path, query, body } => (method, path, query, body),
+        HttpReadResult::TooLarge => {
+            send_json(stream, 413, &json!({"error": "Payload too large"}));
+            return;
+        }
+        HttpReadResult::Invalid => return,
+    };
+
+    match (method.as_str(), path.as_str()) {
+        ("GET", "/api/status") => {
+            let known_rev = parse_query_param(&query, "known_rev")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let include_acct = parse_query_param(&query, "include_account") == Some("1");
+            send_json(stream, 200, &build_daemon_snapshot(known_rev, include_acct));
+        }
+        ("POST", "/api/acc/start") => {
             let (code, val) = handle_acc_start(&req_json);
             send_json(stream, code, &val);
         }
-        "/api/device/repair" => {
+        ("POST", "/api/device/repair") => {
             let (code, val) = handle_device_repair();
             send_json(stream, code, &val);
         }
-        "/api/cleanup-net" => {
+        ("POST", "/api/cleanup-net") => {
             run_cleanup_net();
             send_json(
                 stream,
@@ -383,7 +366,7 @@ fn handle_client(stream: TcpStream) {
                 &json!({"ok": true, "msg": "已清理 GAMEACC 链、策略路由表 99、ipset 与残留 tun 接口"}),
             );
         }
-        "/api/profiles/refresh" => match refresh_cloud_profiles(8) {
+        ("POST", "/api/profiles/refresh") => match refresh_cloud_profiles(8) {
             Ok(n) => send_json(
                 stream,
                 200,
@@ -391,21 +374,21 @@ fn handle_client(stream: TcpStream) {
             ),
             Err(msg) => send_json(stream, 502, &json!({"ok": false, "msg": msg})),
         },
-        "/api/service-restart" => {
+        ("POST", "/api/service-restart") => {
             let ok = Command::new("systemctl")
                 .args(["restart", CORE_SERVICE])
                 .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            send_json(
-                stream,
-                if ok { 200 } else { 500 },
-                &json!({"ok": ok, "msg": if ok { format!("已安全重启 {CORE_SERVICE} 守护服务") } else { "重启服务失败".to_string() }}),
-            );
+                .is_ok_and(|s| s.success());
+            let msg = if ok {
+                format!("已安全重启 {CORE_SERVICE} 守护服务")
+            } else {
+                "重启服务失败".to_string()
+            };
+            send_json(stream, if ok { 200 } else { 500 }, &json!({"ok": ok, "msg": msg}));
         }
-        "/api/account/save-token" => send_json(stream, 200, &handle_save_token(&req_json)),
-        "/api/account/pause" => send_json(stream, 200, &pause_account_time()),
-        "/api/account/recover" => match webapi_post_with_auto_renew("/api/user/recover") {
+        ("POST", "/api/account/save-token") => send_json(stream, 200, &handle_save_token(&req_json)),
+        ("POST", "/api/account/pause") => send_json(stream, 200, &pause_account_time()),
+        ("POST", "/api/account/recover") => match webapi_post_with_auto_renew("/api/user/recover") {
             Ok(res) => send_json(stream, 200, &res),
             Err(e) => send_json(stream, 502, &json!({"code": -1, "msg": e})),
         },
@@ -431,9 +414,10 @@ pub fn run_daemon() {
     let shared_rx = Arc::new(Mutex::new(rx));
     for _ in 0..HTTP_WORKERS {
         let worker_rx = Arc::clone(&shared_rx);
-        thread::spawn(move || loop {
-            let Some(stream) = worker_rx.lock().ok().and_then(|g| g.recv().ok()) else { break };
-            handle_client(stream);
+        thread::spawn(move || {
+            while let Some(stream) = worker_rx.lock().ok().and_then(|g| g.recv().ok()) {
+                handle_client(stream);
+            }
         });
     }
 

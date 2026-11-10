@@ -37,7 +37,7 @@ pub fn load_host_port() -> (String, u16) {
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .filter_map(|l| l.split_once('='))
         {
-            let val = v.trim().trim_matches(|c| c == '\'' || c == '"');
+            let val = v.trim().trim_matches(['\'', '"']);
             match k.trim() {
                 "LEINUX_HOST" if !val.is_empty() => host = val.to_string(),
                 "LEINUX_PORT" => {
@@ -80,15 +80,14 @@ pub fn http_request(method: &str, path: &str, body: Option<&Value>, timeout_ms: 
     serde_json::from_str(body_str.trim()).map_err(|e| format!("JSON parse error: {e}"))
 }
 
-pub fn service_active(unit: &str) -> bool {
+fn service_active(unit: &str) -> bool {
     Command::new("systemctl")
         .args(["is-active", "--quiet", unit])
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
-pub fn ensure_services() {
+fn ensure_services() {
     if !SERVICES.iter().all(|u| service_active(u)) {
         let _ = Command::new("systemctl").arg("start").args(SERVICES).status();
     }
@@ -126,100 +125,64 @@ fn fetch_status(include_account: bool) -> Result<DaemonSnapshot, String> {
     serde_json::from_value(val).map_err(|e| e.to_string())
 }
 
-fn cmd_login() -> i32 {
+fn cmd_login() -> Result<(), String> {
     ensure_services();
     println!("正在打开雷神登录小窗口，请在窗口中完成手机号或密码登录...");
-    let ptok = match login::run_browser_login_popup() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("登录未完成: {e}");
-            return 1;
-        }
-    };
-    match http_request("POST", "/api/account/save-token", Some(&json!({"account_token": ptok})), 12000) {
-        Ok(res) if res["ok"].as_bool() == Some(true) => {
-            println!("登录成功！已自动完成本机硬件绑定与官网凭证同步。");
-            cmd_status()
-        }
-        Ok(res) => {
-            eprintln!("保存凭证失败: {res}");
-            1
-        }
-        Err(e) => {
-            eprintln!("保存凭证失败: {e}");
-            1
-        }
+    let ptok = login::run_browser_login_popup()?;
+    let res = http_request("POST", "/api/account/save-token", Some(&json!({"account_token": ptok})), 12000)?;
+    if res["ok"].as_bool() != Some(true) {
+        return Err(format!("保存凭证失败: {res}"));
     }
+    println!("登录成功！已自动完成本机硬件绑定与官网凭证同步。");
+    cmd_status()
 }
 
-fn cmd_list() -> i32 {
+fn cmd_list() -> Result<(), String> {
     ensure_services();
-    let snap = match fetch_status(false) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("错误: 无法连接后台服务: {e}");
-            return 1;
-        }
-    };
-    let profiles = snap.profiles.unwrap_or_default();
+    let profiles = fetch_status(false)
+        .map_err(|e| format!("无法连接后台服务: {e}"))?
+        .profiles
+        .unwrap_or_default();
+
     for cont in CONTINENT_ORDER {
         let items: Vec<_> = profiles.iter().filter(|p| p.continent == cont).collect();
-        if items.is_empty() {
-            continue;
-        }
-        println!("[{cont}]");
-        for p in items {
-            println!("  {:<6} {} ({} 节点)", p.area, p.name, p.node_count);
+        if !items.is_empty() {
+            println!("[{cont}]");
+            for p in items {
+                println!("  {:<6} {} ({} 节点)", p.area, p.name, p.node_count);
+            }
         }
     }
-    0
+    Ok(())
 }
 
-fn cmd_start(area: &str) -> i32 {
+fn cmd_start(area: &str) -> Result<(), String> {
     let area = area.trim().to_lowercase();
     ensure_services();
-    match http_request("POST", "/api/acc/start", Some(&json!({"area": area, "recover": true})), 10000) {
-        Ok(res) if res["ok"].as_bool() == Some(true) => {
-            let resolved_area = res["area"].as_str().unwrap_or(&area);
-            let name = res["name"].as_str().unwrap_or(resolved_area);
-            println!("已恢复时长并启动加速: {name} ({resolved_area})");
-            0
-        }
-        Ok(res) => {
-            eprintln!("错误: {}", res["msg"].as_str().unwrap_or("启动加速失败"));
-            1
-        }
-        Err(e) => {
-            eprintln!("启动加速失败: {e}");
-            1
-        }
+    let res = http_request("POST", "/api/acc/start", Some(&json!({"area": area, "recover": true})), 10000)?;
+    if res["ok"].as_bool() != Some(true) {
+        return Err(res["msg"].as_str().unwrap_or("启动加速失败").to_string());
     }
+    let resolved = res["area"].as_str().unwrap_or(&area);
+    let name = res["name"].as_str().unwrap_or(resolved);
+    println!("已恢复时长并启动加速: {name} ({resolved})");
+    Ok(())
 }
 
-fn cmd_pause() -> i32 {
+fn cmd_pause() -> Result<(), String> {
     ensure_services();
-    match http_request("POST", "/api/account/pause", Some(&json!({})), 8000) {
-        Ok(res) => {
-            if res["local_only"].as_bool() == Some(true) {
-                println!("{}", res["msg"].as_str().unwrap_or("已停止本地加速"));
-            } else if res["code"].as_i64() == Some(0) {
-                println!("已断开加速隧道并暂停雷神账号时长");
-            } else {
-                println!(
-                    "已断开加速隧道，官网暂停返回: {}",
-                    res["msg"].as_str().unwrap_or("请检查官网 Token")
-                );
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("暂停失败: {e}");
-            1
-        }
+    let res = http_request("POST", "/api/account/pause", Some(&json!({})), 8000)?;
+    if res["local_only"].as_bool() == Some(true) {
+        println!("{}", res["msg"].as_str().unwrap_or("已停止本地加速"));
+    } else if res["code"].as_i64() == Some(0) {
+        println!("已断开加速隧道并暂停雷神账号时长");
+    } else {
+        println!("已断开加速隧道，官网暂停返回: {}", res["msg"].as_str().unwrap_or("请检查官网 Token"));
     }
+    Ok(())
 }
 
-fn cmd_stop() -> i32 {
+fn cmd_stop() -> Result<(), String> {
     if service_active(DAEMON_SERVICE) {
         let _ = http_request("POST", "/api/account/pause", Some(&json!({})), 5000);
     }
@@ -227,28 +190,24 @@ fn cmd_stop() -> i32 {
         .args(["stop", DAEMON_SERVICE, CORE_SERVICE])
         .status();
     println!("已暂停账号时长并停止 {DAEMON_SERVICE} 与 {CORE_SERVICE}");
-    0
+    Ok(())
 }
 
-fn cmd_status() -> i32 {
+fn cmd_status() -> Result<(), String> {
     if !service_active(DAEMON_SERVICE) {
         println!("服务状态: 已停止 (可执行 'lgd' 或 'lgd --start hk' 启动)");
-        return 0;
+        return Ok(());
     }
 
     let (host, port) = load_host_port();
-    let Ok(snap) = fetch_status(true) else {
-        println!("服务状态: 异常 (无法连接 http://{host}:{port})");
-        return 1;
-    };
-
+    let snap = fetch_status(true).map_err(|_| format!("服务状态: 异常 (无法连接 http://{host}:{port})"))?;
     let profiles = snap.profiles.unwrap_or_default();
+
     let (acc_str, delay_str) = if snap.is_accelerating {
         let name = profiles
             .iter()
             .find(|p| p.area == snap.active_area)
-            .map(|p| p.name.as_str())
-            .unwrap_or(&snap.active_area);
+            .map_or(snap.active_area.as_str(), |p| p.name.as_str());
         let delay = if snap.net_delay > 0 { format!("{} ms", snap.net_delay) } else { "- ms".to_string() };
         (format!("{name} · 加速中 ({})", snap.tun_interface), delay)
     } else {
@@ -266,66 +225,67 @@ fn cmd_status() -> i32 {
     println!("服务状态: 运行中 (http://{host}:{port})");
     println!("加速状态: {acc_str} | 节点延迟: {delay_str}");
     println!("账号时长: {acct_line}");
-    0
+    Ok(())
 }
 
-fn cmd_port(port_str: &str) -> i32 {
-    let Some(port) = port_str.parse::<u16>().ok().filter(|&p| p > 0) else {
-        eprintln!("错误: 请提供合法的端口号 (1-65535)，例如: lgd --port 8090");
-        return 1;
-    };
+fn cmd_port(port_str: &str) -> Result<(), String> {
+    let port = port_str
+        .parse::<u16>()
+        .ok()
+        .filter(|&p| p > 0)
+        .ok_or("请提供合法的端口号 (1-65535)，例如: lgd --port 8090")?;
+
     if unsafe { libc::geteuid() } != 0 {
         let exe = env::current_exe().unwrap_or_else(|_| Path::new("/usr/bin/lgd").to_path_buf());
         let err = Command::new("sudo").arg(exe).args(["--port", port_str]).exec();
-        eprintln!("错误: 无法调用 sudo: {err}");
-        return 1;
+        return Err(format!("无法调用 sudo: {err}"));
     }
     if let Some(parent) = Path::new(CONF_FILE).parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let content = format!("LEINUX_HOST=127.0.0.1\nLEINUX_PORT={port}\n");
-    if let Err(e) = fs::write(CONF_FILE, content) {
-        eprintln!("错误: 写入 {CONF_FILE} 失败: {e}");
-        return 1;
-    }
-    let _ = Command::new("systemctl")
-        .args(["restart", DAEMON_SERVICE])
-        .status();
+    fs::write(CONF_FILE, format!("LEINUX_HOST=127.0.0.1\nLEINUX_PORT={port}\n"))
+        .map_err(|e| format!("写入 {CONF_FILE} 失败: {e}"))?;
+
+    let _ = Command::new("systemctl").args(["restart", DAEMON_SERVICE]).status();
     println!("已将守护服务端口更新为 {port} 并重启服务: http://127.0.0.1:{port}");
-    0
+    Ok(())
 }
 
-fn main() {
+fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => print_help(),
         Some("--daemon") => daemon::run_daemon(),
-        Some("--login") => process::exit(cmd_login()),
-        Some("--start") => process::exit(cmd_start(args.get(1).map(String::as_str).unwrap_or(""))),
-        Some("--list" | "--regions") => process::exit(cmd_list()),
-        Some("--pause") => process::exit(cmd_pause()),
-        Some("--stop") => process::exit(cmd_stop()),
-        Some("--status") => process::exit(cmd_status()),
+        Some("--login") => cmd_login()?,
+        Some("--start") => cmd_start(args.get(1).map_or("", String::as_str))?,
+        Some("--list" | "--regions") => cmd_list()?,
+        Some("--pause") => cmd_pause()?,
+        Some("--stop") => cmd_stop()?,
+        Some("--status") => cmd_status()?,
         Some("--port") => {
-            let Some(p) = args.get(1) else {
-                eprintln!("错误: --port 需要指定端口号");
-                process::exit(1);
-            };
-            process::exit(cmd_port(p));
+            let port_str = args.get(1).ok_or("--port 需要指定端口号")?;
+            cmd_port(port_str)?;
         }
         Some(other) => {
-            eprintln!("未知选项: {other}\n");
             print_help();
-            process::exit(1);
+            return Err(format!("未知选项: {other}"));
         }
         None => {
             ensure_services();
             if env::var_os("DISPLAY").is_some() || env::var_os("WAYLAND_DISPLAY").is_some() {
                 gui::run_gui();
             } else {
-                let _ = cmd_status();
+                cmd_status()?;
                 println!("当前无图形界面环境，可使用 'lgd --list' 或 'lgd --start <区服>' 进行管理。");
             }
         }
+    }
+    Ok(())
+}
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("错误: {err}");
+        process::exit(1);
     }
 }

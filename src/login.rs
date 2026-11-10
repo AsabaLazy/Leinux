@@ -30,15 +30,9 @@ static LOGIN_POPUP_OPEN: AtomicBool = AtomicBool::new(false);
 
 pub fn find_chromium_binary() -> Option<PathBuf> {
     let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
-        for name in BROWSER_CANDIDATES {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    env::split_paths(&path_var)
+        .flat_map(|dir| BROWSER_CANDIDATES.into_iter().map(move |name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
 }
 
 fn percent_decode(input: &str) -> String {
@@ -85,8 +79,7 @@ fn base64_decode(input: &str) -> Option<String> {
     let mut buf = 0u32;
     let mut bits = 0u8;
     for b in clean {
-        let v = b64_val(b)? as u32;
-        buf = (buf << 6) | v;
+        buf = (buf << 6) | (b64_val(b)? as u32);
         bits += 6;
         if bits >= 8 {
             bits -= 8;
@@ -103,11 +96,7 @@ pub fn decode_auth_token_cookie(raw_val: &str) -> Option<String> {
     }
     let decoded = base64_decode(&unescaped)?;
     let trimmed = decoded.trim();
-    if is_valid_ptoken(trimmed) {
-        Some(trimmed.to_string())
-    } else {
-        None
-    }
+    is_valid_ptoken(trimmed).then(|| trimmed.to_string())
 }
 
 fn create_login_profile_dir() -> Result<PathBuf, String> {
@@ -133,14 +122,14 @@ struct PopupGuard {
 impl Drop for PopupGuard {
     fn drop(&mut self) {
         if let Some(ref mut c) = self.child {
-            let mut exited = false;
-            for _ in 0..6 {
-                if let Ok(Some(_)) = c.try_wait() {
-                    exited = true;
-                    break;
+            let exited = (0..6).any(|_| {
+                if matches!(c.try_wait(), Ok(Some(_))) {
+                    true
+                } else {
+                    thread::sleep(Duration::from_millis(40));
+                    false
                 }
-                thread::sleep(Duration::from_millis(40));
-            }
+            });
             if !exited {
                 let _ = c.kill();
                 let _ = c.wait();
@@ -156,24 +145,55 @@ fn read_devtools_endpoint(profile_dir: &Path) -> Option<(u16, String)> {
     let mut lines = content.lines();
     let port = lines.next()?.trim().parse::<u16>().ok()?;
     let path = lines.next()?.trim().to_string();
-    if path.is_empty() { None } else { Some((port, path)) }
+    (!path.is_empty()).then_some((port, path))
+}
+
+fn wait_for_devtools(guard: &mut PopupGuard) -> Result<(u16, String), String> {
+    for _ in 0..80 {
+        if guard.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(Some(_)))) {
+            return Err("已取消登录".to_string());
+        }
+        if let Some(ep) = read_devtools_endpoint(&guard.profile_dir) {
+            return Ok(ep);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err("连接登录小窗口调试端口超时".to_string())
+}
+
+fn poll_auth_token_cookie(port: u16, ws_path: &str) -> Option<String> {
+    let resp = ws_rpc_call(
+        "127.0.0.1",
+        port,
+        ws_path,
+        &json!({"id": 1, "method": "Storage.getCookies"}),
+        800,
+    )
+    .ok()?;
+
+    resp["result"]["cookies"].as_array()?.iter().find_map(|ck| {
+        let name = ck["name"].as_str()?;
+        let domain = ck["domain"].as_str()?;
+        let is_leigod_auth = name == "AuthToken"
+            && ["xxghh", "nn.com", "leigod"].iter().any(|d| domain.contains(d));
+        is_leigod_auth
+            .then(|| ck["value"].as_str())
+            .flatten()
+            .and_then(decode_auth_token_cookie)
+    })
 }
 
 pub fn run_browser_login_popup() -> Result<String, String> {
-    let Some(browser) = find_chromium_binary() else {
-        return Err("未检测到 Chrome / Chromium / Edge / Brave 浏览器，请在设置中手动粘贴 Token".to_string());
-    };
+    let browser = find_chromium_binary()
+        .ok_or("未检测到 Chrome / Chromium / Edge / Brave 浏览器，请在设置中手动粘贴 Token")?;
+
     if LOGIN_POPUP_OPEN.swap(true, Ordering::SeqCst) {
         return Err("登录小窗口已打开，请在弹出的窗口中完成登录".to_string());
-    };
+    }
 
-    let profile_dir = match create_login_profile_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            LOGIN_POPUP_OPEN.store(false, Ordering::SeqCst);
-            return Err(e);
-        }
-    };
+    let profile_dir = create_login_profile_dir().inspect_err(|_| {
+        LOGIN_POPUP_OPEN.store(false, Ordering::SeqCst);
+    })?;
 
     let child = Command::new(&browser)
         .args([
@@ -191,77 +211,35 @@ pub fn run_browser_login_popup() -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
-
-    let child = match child {
-        Ok(c) => c,
-        Err(e) => {
+        .spawn()
+        .map_err(|e| {
             let _ = fs::remove_dir_all(&profile_dir);
             LOGIN_POPUP_OPEN.store(false, Ordering::SeqCst);
-            return Err(format!("拉起浏览器登录窗口失败: {e}"));
-        }
-    };
+            format!("拉起浏览器登录窗口失败: {e}")
+        })?;
 
     let mut guard = PopupGuard {
         child: Some(child),
         profile_dir,
     };
 
-    let mut endpoint = None;
-    for _ in 0..80 {
-        if let Some(ref mut c) = guard.child {
-            if let Ok(Some(_)) = c.try_wait() {
-                return Err("已取消登录".to_string());
-            }
-        }
-        if let Some(ep) = read_devtools_endpoint(&guard.profile_dir) {
-            endpoint = Some(ep);
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-
-    let Some((port, ws_path)) = endpoint else {
-        return Err("连接登录小窗口调试端口超时".to_string());
-    };
-
+    let (port, ws_path) = wait_for_devtools(&mut guard)?;
     let deadline = Instant::now() + Duration::from_secs(300);
+
     while Instant::now() < deadline {
-        if let Some(ref mut c) = guard.child {
-            if let Ok(Some(_)) = c.try_wait() {
-                return Err("已关闭登录窗口".to_string());
-            }
+        if guard.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(Some(_)))) {
+            return Err("已关闭登录窗口".to_string());
         }
-
-        if let Ok(resp) = ws_rpc_call(
-            "127.0.0.1",
-            port,
-            &ws_path,
-            &json!({"id": 1, "method": "Storage.getCookies"}),
-            800,
-        ) {
-            if let Some(cookies) = resp["result"]["cookies"].as_array() {
-                for ck in cookies {
-                    let name = ck["name"].as_str().unwrap_or("");
-                    let domain = ck["domain"].as_str().unwrap_or("");
-                    if name == "AuthToken"
-                        && (domain.contains("xxghh") || domain.contains("nn.com") || domain.contains("leigod"))
-                    {
-                        if let Some(val) = ck["value"].as_str().and_then(decode_auth_token_cookie) {
-                            let _ = ws_rpc_call(
-                                "127.0.0.1",
-                                port,
-                                &ws_path,
-                                &json!({"id": 2, "method": "Browser.close"}),
-                                500,
-                            );
-                            return Ok(val);
-                        }
-                    }
-                }
-            }
+        if let Some(ptok) = poll_auth_token_cookie(port, &ws_path) {
+            let _ = ws_rpc_call(
+                "127.0.0.1",
+                port,
+                &ws_path,
+                &json!({"id": 2, "method": "Browser.close"}),
+                500,
+            );
+            return Ok(ptok);
         }
-
         thread::sleep(Duration::from_millis(350));
     }
 
@@ -274,7 +252,6 @@ mod tests {
 
     #[test]
     fn test_decode_auth_token_cookie() {
-        // Real Base64("220bee8af3a6452b94133051140e8da2") = "MjIwYmVlOGFmM2E2NDUyYjk0MTMzMDUxMTQwZThkYTI="
         assert_eq!(
             decode_auth_token_cookie("MjIwYmVlOGFmM2E2NDUyYjk0MTMzMDUxMTQwZThkYTI%3D").as_deref(),
             Some("220bee8af3a6452b94133051140e8da2")
@@ -293,9 +270,7 @@ mod tests {
 
     #[test]
     fn test_real_chromium_cdp_ws_rpc_call() {
-        let Some(browser) = find_chromium_binary() else {
-            return;
-        };
+        let Some(browser) = find_chromium_binary() else { return };
         let profile_dir = create_login_profile_dir().expect("create temp profile");
         let child = Command::new(browser)
             .args([
@@ -313,19 +288,11 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn headless browser");
-        let guard = PopupGuard {
+        let mut guard = PopupGuard {
             child: Some(child),
             profile_dir,
         };
-        let mut endpoint = None;
-        for _ in 0..80 {
-            if let Some(ep) = read_devtools_endpoint(&guard.profile_dir) {
-                endpoint = Some(ep);
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        let (port, ws_path) = endpoint.expect("DevToolsActivePort endpoint");
+        let (port, ws_path) = wait_for_devtools(&mut guard).expect("DevToolsActivePort endpoint");
         ws_rpc_call(
             "127.0.0.1",
             port,
@@ -346,21 +313,10 @@ mod tests {
         )
         .expect("Storage.setCookies via ws_rpc_call");
 
-        let resp = ws_rpc_call(
-            "127.0.0.1",
-            port,
-            &ws_path,
-            &json!({"id": 2, "method": "Storage.getCookies"}),
-            1500,
-        )
-        .expect("Storage.getCookies via ws_rpc_call");
-
-        let cookies = resp["result"]["cookies"].as_array().expect("cookies array");
-        let extracted = cookies
-            .iter()
-            .filter(|ck| ck["name"].as_str() == Some("AuthToken"))
-            .find_map(|ck| ck["value"].as_str().and_then(decode_auth_token_cookie));
-        assert_eq!(extracted.as_deref(), Some("220bee8af3a6452b94133051140e8da2"));
+        assert_eq!(
+            poll_auth_token_cookie(port, &ws_path).as_deref(),
+            Some("220bee8af3a6452b94133051140e8da2")
+        );
 
         let _ = ws_rpc_call(
             "127.0.0.1",
@@ -369,6 +325,5 @@ mod tests {
             &json!({"id": 3, "method": "Browser.close"}),
             500,
         );
-        drop(guard);
     }
 }
