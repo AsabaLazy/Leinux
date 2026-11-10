@@ -1,6 +1,6 @@
 [package]
 name = "leinux"
-version = "1.3.0"
+version = "0.2.2"
 edition = "2021"
 description = "Native GTK4 GUI, CLI, and daemon for Leigod Accelerator on Linux"
 license = "MIT"

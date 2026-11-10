@@ -883,19 +883,19 @@ impl UiCtx {
     }
 
     fn present_about(&self) {
-        let ver = {
-            let st = self.state.borrow();
-            if st.snap.version.is_empty() {
-                env!("CARGO_PKG_VERSION").to_string()
-            } else {
-                st.snap.version.clone()
-            }
+        let ver = env!("CARGO_PKG_VERSION");
+        let core_ver = self.state.borrow().snap.version.clone();
+        let debug_info = if core_ver.is_empty() {
+            format!("Leinux: v{ver}")
+        } else {
+            format!("Leinux: v{ver}\nLeigod Core: {core_ver}")
         };
         let about = adw::AboutDialog::builder()
             .application_name("Leinux")
             .application_icon(APP_ID)
             .developer_name("AsabaLazy")
             .version(ver)
+            .debug_info(debug_info)
             .comments("雷神加速器 Linux 原生 GTK4 客户端")
             .website("https://github.com/AsabaLazy/Leinux")
             .issue_url("https://github.com/AsabaLazy/Leinux/issues")

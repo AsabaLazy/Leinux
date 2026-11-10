@@ -115,6 +115,7 @@ Leinux — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
   --status             查看服务运行状态、当前加速区服与账号剩余时长
   --port <PORT>        修改本地守护服务端口 (写入 {CONF_FILE}) 并重启服务
   --daemon             以守护进程模式运行后台 RPC 与路由服务
+  -V, --version        显示客户端版本信息
   -h, --help           显示此帮助信息"
     );
 }
@@ -255,6 +256,7 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => print_help(),
+        Some("-V" | "--version") => println!("leinux {}", env!("CARGO_PKG_VERSION")),
         Some("--daemon") => daemon::run_daemon(),
         Some("--login") => cmd_login()?,
         Some("--start") => cmd_start(args.get(1).map_or("", String::as_str))?,
