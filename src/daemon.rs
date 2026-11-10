@@ -266,7 +266,7 @@ fn load_account_config() -> Value {
             }
         }
     }
-    json!({"account_token": "", "auto_pause_on_stop": true, "custom_dns": ""})
+    json!({"account_token": "", "p_token": "", "user_id": "", "auto_pause_on_stop": true, "custom_dns": ""})
 }
 
 fn save_account_config(cfg: &Value) {
@@ -283,6 +283,195 @@ fn save_account_config(cfg: &Value) {
     if let Ok(mut guard) = cache().lock() {
         guard.last_sig.clear();
     }
+}
+
+fn resolve_p_token(cfg: &Value) -> String {
+    let saved = cfg["p_token"].as_str().unwrap_or("").trim();
+    if saved.len() == 32 && saved.chars().all(|c| c.is_ascii_hexdigit()) {
+        return saved.to_string();
+    }
+    for p in load_saved_profiles() {
+        let conf_val: Value = match &p["conf"] {
+            Value::String(s) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
+            other => other.clone(),
+        };
+        let utok = conf_val["user"]["token"].as_str().unwrap_or("").trim();
+        if utok.len() == 32 && utok.chars().all(|c| c.is_ascii_hexdigit()) {
+            return utok.to_string();
+        }
+    }
+    String::new()
+}
+
+fn exchange_ptoken_for_web_token(p_token: &str) -> Option<(String, String)> {
+    let p_token = p_token.trim();
+    if p_token.is_empty() {
+        return None;
+    }
+    let out1 = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--max-time",
+            "5",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            &format!("token: {p_token}"),
+            "-H",
+            "appId: nnMobile_d0k3duup",
+            "-H",
+            "version: 600",
+            "-H",
+            "reqChannel: 2",
+            "-H",
+            "platform: 2",
+            "-H",
+            "busiType: nn_aksjfdasoifnkls",
+            "-d",
+            "{}",
+            "https://opapi.xxghh.biz/u-mobile/getSpeedWebTokenSign",
+        ])
+        .output()
+        .ok()?;
+    let d1: Value = serde_json::from_slice(&out1.stdout).ok()?;
+    let ret_obj = d1["retData"].as_object()?;
+    let uid = ret_obj
+        .get("user_id")
+        .and_then(|v| v.as_i64().map(|n| n.to_string()).or_else(|| v.as_str().map(|s| s.to_string())))
+        .unwrap_or_default();
+
+    let mut clean_body = Map::new();
+    for (k, v) in ret_obj {
+        if !v.is_null() {
+            clean_body.insert(k.clone(), v.clone());
+        }
+    }
+    let body_str = Value::Object(clean_body).to_string();
+
+    let out2 = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--max-time",
+            "5",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body_str,
+            "https://webapi.xxghh.biz/passport/web/token",
+        ])
+        .output()
+        .ok()?;
+    let d2: Value = serde_json::from_slice(&out2.stdout).ok()?;
+    let acct_tok = d2["data"]["account_token"].as_str()?.trim().to_string();
+    if acct_tok.is_empty() {
+        return None;
+    }
+    Some((acct_tok, uid))
+}
+
+fn read_device_mac() -> String {
+    for p in [PathBuf::from("/sys/class/net/wlan0/address"), state_dir().join("device-mac")] {
+        if let Ok(s) = fs::read_to_string(p) {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn ensure_router_bound(p_token: &str, user_id: &str, force: bool) -> bool {
+    let p_token = p_token.trim();
+    if p_token.is_empty() {
+        return false;
+    }
+    let (_, cur_rtoken, cur_uid) = read_ini_values();
+    if !force && !cur_rtoken.is_empty() && !cur_rtoken.starts_with('<') {
+        return true;
+    }
+    let uid = if !user_id.trim().is_empty() {
+        user_id.trim().to_string()
+    } else if !cur_uid.is_empty() {
+        cur_uid
+    } else if let Some((_, u)) = exchange_ptoken_for_web_token(p_token) {
+        u
+    } else {
+        String::new()
+    };
+    if uid.is_empty() {
+        return false;
+    }
+    let mac = read_device_mac();
+    let req = json!({
+        "cmd": "newBindRouter",
+        "tag": "leinux-auto-bind",
+        "sn": mac,
+        "data": {
+            "captcha": "",
+            "appId": "nnMobile_d0k3duup",
+            "reqChannel": "2",
+            "pToken": p_token,
+            "checkUrl": "https://opapi1.xxghh.biz/speed",
+            "userId": uid,
+            "bindCode": "",
+        }
+    });
+    ws_rpc_call("127.0.0.1", 5588, "/ws", &req, 6000)
+        .map(|res| res["code"].as_i64() == Some(0))
+        .unwrap_or(false)
+}
+
+fn webapi_post_with_auto_renew(endpoint: &str) -> Result<Value, String> {
+    let mut cfg = load_account_config();
+    let mut acct_tok = cfg["account_token"].as_str().unwrap_or("").trim().to_string();
+    let p_tok = resolve_p_token(&cfg);
+
+    if !p_tok.is_empty() {
+        let uid = cfg["user_id"].as_str().unwrap_or("");
+        let _ = ensure_router_bound(&p_tok, uid, false);
+    }
+
+    if acct_tok.is_empty() && !p_tok.is_empty() {
+        if let Some((new_tok, uid)) = exchange_ptoken_for_web_token(&p_tok) {
+            cfg["account_token"] = json!(new_tok.clone());
+            cfg["p_token"] = json!(p_tok.clone());
+            if !uid.is_empty() {
+                cfg["user_id"] = json!(uid);
+            }
+            save_account_config(&cfg);
+            acct_tok = new_tok;
+        }
+    }
+
+    if acct_tok.is_empty() {
+        return Err("请先配置官网 account_token 或移动端 pToken".to_string());
+    }
+
+    let first = webapi_post(endpoint, &acct_tok);
+    if let Ok(ref v) = first {
+        if v["code"].as_i64() == Some(0) {
+            return first;
+        }
+    }
+
+    if !p_tok.is_empty() {
+        if let Some((new_tok, uid)) = exchange_ptoken_for_web_token(&p_tok) {
+            cfg["account_token"] = json!(new_tok.clone());
+            cfg["p_token"] = json!(p_tok);
+            if !uid.is_empty() {
+                cfg["user_id"] = json!(uid);
+            }
+            save_account_config(&cfg);
+            return webapi_post(endpoint, &new_tok);
+        }
+    }
+
+    first
 }
 
 fn flush_dns_cache() {
@@ -517,10 +706,11 @@ fn pause_account_time(account_token: &str, router_token: &str) -> Value {
     }
     remove_mangle_guard();
     flush_dns_cache();
-    if account_token.trim().is_empty() {
+    let cfg = load_account_config();
+    if account_token.trim().is_empty() && resolve_p_token(&cfg).is_empty() {
         return json!({"code": 0, "local_only": true, "msg": "已停止本地加速（未配置官网 Token，未暂停官网时长）"});
     }
-    match webapi_post("/api/user/pause", account_token.trim()) {
+    match webapi_post_with_auto_renew("/api/user/pause") {
         Ok(v) => v,
         Err(e) => json!({"code": -1, "msg": e}),
     }
@@ -1415,7 +1605,8 @@ pub fn read_host_status() -> Value {
         "token": token,
         "user_id": user_id,
         "profiles": scan_and_capture_active_profiles(),
-        "has_account_token": !acct_cfg["account_token"].as_str().unwrap_or("").trim().is_empty(),
+        "has_account_token": !acct_cfg["account_token"].as_str().unwrap_or("").trim().is_empty()
+            || !resolve_p_token(&acct_cfg).is_empty(),
         "auto_pause_on_stop": acct_cfg["auto_pause_on_stop"].as_bool().unwrap_or(true),
     })
 }
@@ -1497,13 +1688,14 @@ fn handle_client(stream: TcpStream) {
             "/api/account/status" => {
                 let cfg = load_account_config();
                 let acct_tok = cfg["account_token"].as_str().unwrap_or("").trim().to_string();
+                let p_tok = resolve_p_token(&cfg);
                 let gw = detect_gateway_ip();
                 let gw_dns = if gw.is_empty() {
                     "223.5.5.5:53".to_string()
                 } else {
                     format!("{gw}:53")
                 };
-                if acct_tok.is_empty() {
+                if acct_tok.is_empty() && p_tok.is_empty() {
                     send_json(
                         stream,
                         200,
@@ -1515,7 +1707,7 @@ fn handle_client(stream: TcpStream) {
                         }),
                     );
                 } else {
-                    match webapi_post("/api/user/info", &acct_tok) {
+                    match webapi_post_with_auto_renew("/api/user/info") {
                         Ok(res) => send_json(
                             stream,
                             200,
@@ -1561,7 +1753,34 @@ fn handle_client(stream: TcpStream) {
                     return;
                 }
 
+                if cmd_upper == "AUTOREPAIRBOUND" {
+                    let cfg = load_account_config();
+                    let p_tok = resolve_p_token(&cfg);
+                    let uid = cfg["user_id"].as_str().unwrap_or("");
+                    if !p_tok.is_empty() {
+                        let _ = ensure_router_bound(&p_tok, uid, true);
+                        let (_, new_rtok, new_uid) = read_ini_values();
+                        if !new_rtok.is_empty() {
+                            req_obj["data"]["rToken"] = json!(new_rtok);
+                        }
+                        if !new_uid.is_empty() {
+                            req_obj["data"]["userId"] = json!(new_uid);
+                        }
+                    }
+                }
+
                 if matches!(cmd_upper.as_str(), "STARTACC" | "START") {
+                    let cfg = load_account_config();
+                    let p_tok = resolve_p_token(&cfg);
+                    if !p_tok.is_empty() {
+                        let uid = cfg["user_id"].as_str().unwrap_or("");
+                        if ensure_router_bound(&p_tok, uid, false) {
+                            let (_, new_rtok, _) = read_ini_values();
+                            if !new_rtok.is_empty() {
+                                req_obj["data"]["token"] = json!(new_rtok);
+                            }
+                        }
+                    }
                     install_mangle_guard();
                     if !req_obj["data"]["conf"].is_null() {
                         let (_, parsed_conf, _) = sanitize_acc_conf(&req_obj["data"]["conf"]);
@@ -1661,12 +1880,33 @@ fn handle_client(stream: TcpStream) {
                         let tok = if trimmed.starts_with('{') {
                             serde_json::from_str::<Value>(trimmed)
                                 .ok()
-                                .and_then(|v| v["account_token"].as_str().map(|s| s.to_string()))
+                                .and_then(|v| {
+                                    v["account_token"]
+                                        .as_str()
+                                        .or_else(|| v["p_token"].as_str())
+                                        .or_else(|| v["token"].as_str())
+                                        .map(|s| s.to_string())
+                                })
                                 .unwrap_or_else(|| trimmed.to_string())
                         } else {
                             trimmed.to_string()
                         };
-                        cfg["account_token"] = json!(tok);
+                        if tok.len() == 32 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
+                            cfg["p_token"] = json!(tok.clone());
+                            if let Some((web_tok, uid)) = exchange_ptoken_for_web_token(&tok) {
+                                cfg["account_token"] = json!(web_tok);
+                                if !uid.is_empty() {
+                                    cfg["user_id"] = json!(uid.clone());
+                                    let _ = ensure_router_bound(&tok, &uid, false);
+                                }
+                            }
+                        } else {
+                            cfg["account_token"] = json!(tok);
+                            let p_tok = resolve_p_token(&cfg);
+                            if !p_tok.is_empty() {
+                                cfg["p_token"] = json!(p_tok);
+                            }
+                        }
                     }
                 }
                 if let Some(ap) = req_json["auto_pause_on_stop"].as_bool() {
@@ -1679,12 +1919,7 @@ fn handle_client(stream: TcpStream) {
                 if req_json.get("custom_dns").is_some() {
                     let _ = scan_and_capture_active_profiles();
                 }
-                let acct_tok = cfg["account_token"].as_str().unwrap_or("").trim();
-                let info = if acct_tok.is_empty() {
-                    json!({})
-                } else {
-                    webapi_post("/api/user/info", acct_tok).unwrap_or_else(|_| json!({}))
-                };
+                let info = webapi_post_with_auto_renew("/api/user/info").unwrap_or_else(|_| json!({}));
                 send_json(
                     stream,
                     200,
@@ -1704,15 +1939,9 @@ fn handle_client(stream: TcpStream) {
                 send_json(stream, 200, &res);
             }
             "/api/account/recover" => {
-                let cfg = load_account_config();
-                let acct_tok = cfg["account_token"].as_str().unwrap_or("").trim().to_string();
-                if acct_tok.is_empty() {
-                    send_json(stream, 400, &json!({"code": -1, "msg": "请先配置官网 account_token"}));
-                } else {
-                    match webapi_post("/api/user/recover", &acct_tok) {
-                        Ok(res) => send_json(stream, 200, &res),
-                        Err(e) => send_json(stream, 502, &json!({"code": -1, "msg": e})),
-                    }
+                match webapi_post_with_auto_renew("/api/user/recover") {
+                    Ok(res) => send_json(stream, 200, &res),
+                    Err(e) => send_json(stream, 502, &json!({"code": -1, "msg": e})),
                 }
             }
             _ => send_json(stream, 404, &json!({"error": "Not found"})),
@@ -1756,7 +1985,9 @@ pub fn run_daemon() {
 
     let cfg = load_account_config();
     let acct_tok = cfg["account_token"].as_str().unwrap_or("").trim().to_string();
-    if !acct_tok.is_empty() && cfg["auto_pause_on_stop"].as_bool().unwrap_or(true) {
+    if (!acct_tok.is_empty() || !resolve_p_token(&cfg).is_empty())
+        && cfg["auto_pause_on_stop"].as_bool().unwrap_or(true)
+    {
         let (_, token, _) = read_ini_values();
         let _ = pause_account_time(&acct_tok, &token);
     }
