@@ -1,7 +1,7 @@
 use crate::net::{
-    detect_gateway_ip, flush_dns_cache, install_mangle_guard, read_device_mac, read_ini_values,
-    read_json_or_default, remove_mangle_guard, run_cleanup_net, set_stop_enforced, state_dir,
-    write_json_atomic,
+    detect_gateway_ip, flush_dns_cache, has_active_tun, install_mangle_guard, read_device_mac,
+    read_ini_values, read_json_or_default, remove_mangle_guard, run_cleanup_net, set_stop_enforced,
+    state_dir, write_json_atomic,
 };
 use crate::profiles::cached_profile_p_token;
 use crate::types::{
@@ -12,6 +12,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::Duration;
 
 fn account_file() -> PathBuf {
@@ -461,13 +462,21 @@ pub fn fetch_account_snapshot() -> AccountSnapshot {
 }
 
 pub fn pause_account_time() -> Value {
-    set_stop_enforced(true);
     let ini = read_ini_values();
     if !ini.rtoken.is_empty() {
         install_mangle_guard();
         let _ = core_rpc("STOPACC", json!({"token": ini.rtoken, "catalogs": [2]}), 3000);
+        for _ in 0..10 {
+            if !has_active_tun() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(80));
+        }
     }
-    run_cleanup_net();
+    set_stop_enforced(true);
+    if has_active_tun() {
+        run_cleanup_net();
+    }
     remove_mangle_guard();
     flush_dns_cache();
 

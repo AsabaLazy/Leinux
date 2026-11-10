@@ -252,9 +252,9 @@ fn handle_worker_cmd(cmd: WorkerCmd, evt_tx: &mpsc::Sender<WorkerEvent>, known_r
     let mut refresh_account = false;
     let mut finished_busy: Option<BusyOp> = None;
 
-    match cmd {
+        match cmd {
         WorkerCmd::StartArea(area) => {
-            match http_request("POST", "/api/acc/start", Some(&json!({"area": area, "recover": true})), 10000) {
+            match http_request("POST", "/api/acc/start", Some(&json!({"area": area, "recover": true})), 12000) {
                 Ok(res) if res["ok"].as_bool() == Some(true) => {}
                 Ok(res) => toast(res["msg"].as_str().unwrap_or("启动加速失败")),
                 Err(_) => toast("启动加速失败，请检查守护服务状态"),
@@ -632,13 +632,14 @@ impl MainWidgets {
         match st.busy {
             Some((BusyOp::Starting, ref target_name)) => {
                 self.status_icon.set_css_classes(&["accent"]);
-                self.status_title.set_text(target_name);
-                self.status_sub.set_text("正在恢复时长并优选节点…");
+                self.status_title.set_text("正在连接");
+                self.status_sub.set_text(&format!("正在恢复时长并连接 {target_name}…"));
                 self.main_btn.btn.set_css_classes(&["pill", "suggested-action"]);
                 self.main_btn.set_state(true, "连接中…", false);
                 return;
             }
             Some((BusyOp::Stopping, _)) => {
+                self.status_title.set_text("正在断开");
                 self.status_sub.set_text("正在断开隧道并暂停时长…");
                 self.main_btn.btn.set_css_classes(&["pill", "destructive-action"]);
                 self.main_btn.set_state(true, "断开中…", false);
@@ -655,8 +656,8 @@ impl MainWidgets {
                 .map_or(st.snap.active_area.as_str(), |p| p.name.as_str());
             let secs = st.started_at.map_or(0, |t| t.elapsed().as_secs());
             self.status_icon.set_css_classes(&["accent"]);
-            self.status_title.set_text(name);
-            self.status_sub.set_text(&format!("加速中 · {}", format_hms(secs)));
+            self.status_title.set_text("已加速");
+            self.status_sub.set_text(&format!("{name} · {}", format_hms(secs)));
             self.main_btn.btn.set_css_classes(&["pill", "destructive-action"]);
             self.main_btn.set_state(false, "停止加速", can_operate);
         } else {

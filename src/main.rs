@@ -159,7 +159,7 @@ fn cmd_list() -> Result<(), String> {
 fn cmd_start(area: &str) -> Result<(), String> {
     let area = area.trim().to_lowercase();
     ensure_services();
-    let res = http_request("POST", "/api/acc/start", Some(&json!({"area": area, "recover": true})), 10000)?;
+    let res = http_request("POST", "/api/acc/start", Some(&json!({"area": area, "recover": true})), 12000)?;
     if res["ok"].as_bool() != Some(true) {
         return Err(res["msg"].as_str().unwrap_or("启动加速失败").to_string());
     }

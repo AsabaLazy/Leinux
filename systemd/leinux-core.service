@@ -14,7 +14,7 @@ KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=10
 Restart=on-failure
-RestartSec=3
+RestartSec=1
 
 StateDirectory=leigod
 StateDirectoryMode=0700

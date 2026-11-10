@@ -94,7 +94,7 @@ fn build_daemon_snapshot(known_rev: u64, include_account: bool) -> DaemonSnapsho
 }
 
 fn wait_for_tun_ready() {
-    for _ in 0..25 {
+    for _ in 0..45 {
         if has_active_tun() {
             break;
         }

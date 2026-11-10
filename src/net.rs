@@ -139,7 +139,8 @@ pub fn check_plugin_service() -> (bool, String) {
     {
         Ok(out) => {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            (out.status.success(), if s.is_empty() { "inactive".to_string() } else { s })
+            let ok = out.status.success() || s == "activating";
+            (ok, if s.is_empty() { "inactive".to_string() } else { s })
         }
         Err(_) => (false, "unknown".to_string()),
     }
