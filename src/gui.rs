@@ -3,7 +3,7 @@ use crate::login::{find_chromium_binary, run_browser_login_popup};
 use crate::types::{AccountSnapshot, DaemonSnapshot, ProfileSummary, CONTINENT_ORDER};
 use adw::prelude::*;
 use gtk4 as gtk;
-use gtk4::glib;
+use gtk4::{gdk, glib, pango};
 use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -14,6 +14,45 @@ use std::time::{Duration, Instant};
 
 const APP_ID: &str = "io.github.asabalazy.leinux";
 const SPARK_POINTS: usize = 30;
+const MAX_TOAST_STACK: usize = 3;
+
+const APP_CSS: &str = "
+.leinux-toast {
+  background-color: var(--popover-bg-color);
+  color: var(--popover-fg-color);
+  border-radius: 14px;
+  padding: 9px 16px;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+              opacity 190ms ease;
+}
+.leinux-toast.entering {
+  transform: translateY(-16px) scale(0.95);
+  opacity: 0;
+}
+.leinux-toast.depth-0 {
+  transform: translateY(0px) scale(1);
+  opacity: 1;
+}
+.leinux-toast.depth-1 {
+  transform: translateY(10px) scale(0.94);
+  opacity: 0.82;
+}
+.leinux-toast.depth-2 {
+  transform: translateY(19px) scale(0.88);
+  opacity: 0.56;
+}
+.leinux-toast.leaving {
+  transform: translateY(-12px) scale(0.94);
+  opacity: 0;
+}
+.token-badge {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background-color: color-mix(in srgb, currentColor 12%, transparent);
+}
+";
 
 enum WorkerEvent {
     Snapshot(Box<DaemonSnapshot>),
@@ -53,6 +92,125 @@ impl GuiState {
     }
 }
 
+struct ToastItem {
+    id: u64,
+    widget: gtk::Box,
+    text: String,
+    created_at: Instant,
+}
+
+#[derive(Clone)]
+struct ToastDeck {
+    overlay: gtk::Overlay,
+    items: Rc<RefCell<VecDeque<ToastItem>>>,
+    next_id: Rc<Cell<u64>>,
+}
+
+impl ToastDeck {
+    fn wrap(content: &impl IsA<gtk::Widget>) -> Self {
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(content));
+        Self {
+            overlay,
+            items: Rc::new(RefCell::new(VecDeque::new())),
+            next_id: Rc::new(Cell::new(1)),
+        }
+    }
+
+    fn sync_depths(&self) {
+        let items = self.items.borrow();
+        let len = items.len();
+        for (idx, item) in items.iter().enumerate() {
+            let depth = (len - 1 - idx).min(2);
+            item.widget.remove_css_class("entering");
+            for d in ["depth-0", "depth-1", "depth-2"] {
+                item.widget.remove_css_class(d);
+            }
+            item.widget.add_css_class(&format!("depth-{depth}"));
+        }
+    }
+
+    fn dismiss(&self, id: u64) {
+        let removed = {
+            let mut items = self.items.borrow_mut();
+            items.iter().position(|it| it.id == id).and_then(|pos| items.remove(pos))
+        };
+        let Some(item) = removed else { return };
+        self.sync_depths();
+
+        for d in ["entering", "depth-0", "depth-1", "depth-2"] {
+            item.widget.remove_css_class(d);
+        }
+        item.widget.add_css_class("leaving");
+
+        let overlay = self.overlay.clone();
+        let widget = item.widget;
+        glib::timeout_add_local_once(Duration::from_millis(200), move || {
+            overlay.remove_overlay(&widget);
+        });
+    }
+
+    fn push(&self, msg: &str) {
+        {
+            let items = self.items.borrow();
+            if items
+                .back()
+                .is_some_and(|last| last.text == msg && last.created_at.elapsed() < Duration::from_millis(350))
+            {
+                return;
+            }
+        }
+
+        while self.items.borrow().len() >= MAX_TOAST_STACK {
+            let oldest_id = self.items.borrow().front().map(|it| it.id);
+            if let Some(id) = oldest_id {
+                self.dismiss(id);
+            } else {
+                break;
+            }
+        }
+
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+
+        let label = gtk::Label::new(Some(msg));
+        label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_max_width_chars(30);
+        label.set_halign(gtk::Align::Center);
+        label.set_hexpand(true);
+
+        let card = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        card.add_css_class("leinux-toast");
+        card.add_css_class("entering");
+        card.set_size_request(344, 38);
+        card.set_halign(gtk::Align::Center);
+        card.set_valign(gtk::Align::Start);
+        card.set_margin_top(12);
+        card.set_can_target(false);
+        card.append(&label);
+
+        self.overlay.add_overlay(&card);
+        self.overlay.set_measure_overlay(&card, false);
+
+        self.items.borrow_mut().push_back(ToastItem {
+            id,
+            widget: card,
+            text: msg.to_string(),
+            created_at: Instant::now(),
+        });
+
+        let deck = self.clone();
+        glib::timeout_add_local_once(Duration::from_millis(16), move || {
+            deck.sync_depths();
+        });
+
+        let deck = self.clone();
+        glib::timeout_add_local_once(Duration::from_millis(2600), move || {
+            deck.dismiss(id);
+        });
+    }
+}
+
 #[derive(Clone)]
 struct MainWidgets {
     win: adw::ApplicationWindow,
@@ -73,14 +231,16 @@ struct MainWidgets {
     speed_history: Rc<RefCell<VecDeque<f64>>>,
     acct_row: adw::ActionRow,
     acct_btn: gtk::Button,
-    toasts: adw::ToastOverlay,
+    toasts: ToastDeck,
 }
 
 #[derive(Clone)]
 struct PrefsWidgets {
-    dialog: adw::PreferencesDialog,
+    dialog: adw::Dialog,
+    login_row: adw::ActionRow,
     login_btn: gtk::Button,
     token_row: adw::PasswordEntryRow,
+    token_badge: gtk::Label,
     auto_pause_row: adw::SwitchRow,
     dns_row: gtk::Editable,
     dns_entry: adw::EntryRow,
@@ -89,6 +249,7 @@ struct PrefsWidgets {
     restart_btn: gtk::Button,
     repair_btn: gtk::Button,
     cleanup_btn: gtk::Button,
+    toasts: ToastDeck,
 }
 
 #[derive(Clone)]
@@ -96,17 +257,30 @@ struct RegionPicker {
     dialog: adw::Dialog,
     filter_bar: gtk::Box,
     list_box: gtk::Box,
+    toasts: ToastDeck,
 }
 
 #[derive(Clone)]
 struct UiCtx {
     state: Rc<RefCell<GuiState>>,
     suppress: Rc<Cell<bool>>,
+    prefs_open: Rc<Cell<bool>>,
+    picker_open: Rc<Cell<bool>>,
     mw: MainWidgets,
     pw: PrefsWidgets,
     picker: RegionPicker,
     cmd_tx: mpsc::Sender<WorkerCmd>,
     evt_tx: mpsc::Sender<WorkerEvent>,
+}
+
+fn install_app_css(display: &gdk::Display) {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(APP_CSS);
+    gtk::style_context_add_provider_for_display(
+        display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
 fn format_bytes(bytes: f64, decimals: usize) -> String {
@@ -116,7 +290,7 @@ fn format_bytes(bytes: f64, decimals: usize) -> String {
     } else if n < 1_048_576.0 {
         format!("{:.*} KB", decimals, n / 1024.0)
     } else if n < 1_073_741_824.0 {
-        format!("{:.*} MB", decimals, n / 1048576.0)
+        format!("{:.*} MB", decimals, n / 1_048_576.0)
     } else {
         format!("{:.*} GB", decimals, n / 1_073_741_824.0)
     }
@@ -231,13 +405,18 @@ fn handle_worker_cmd(cmd: WorkerCmd, evt_tx: &mpsc::Sender<WorkerEvent>, known_r
             refresh_account = true;
         }
         WorkerCmd::SaveToken { token, auto_pause } => {
-            let _ = http_request(
+            match http_request(
                 "POST",
                 "/api/account/save-token",
                 Some(&json!({"account_token": token, "auto_pause_on_stop": auto_pause})),
                 12000,
-            );
-            toast("已保存凭证并同步本机绑定与账号状态");
+            ) {
+                Ok(res) if res["response"]["code"].as_i64() == Some(0) => {
+                    toast("凭证验证通过，已完成绑定与同步");
+                }
+                Ok(_) => toast("已写入凭证，但官网校验未通过"),
+                Err(_) => toast("保存凭证失败"),
+            }
             refresh_account = true;
         }
         WorkerCmd::SaveAutoPause(auto_pause) => {
@@ -393,9 +572,9 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
     view.set_content(Some(&scroller));
-    let toasts = adw::ToastOverlay::new();
-    toasts.set_child(Some(&view));
-    win.set_content(Some(&toasts));
+
+    let toasts = ToastDeck::wrap(&view);
+    win.set_content(Some(&toasts.overlay));
 
     MainWidgets {
         win,
@@ -427,10 +606,21 @@ fn build_prefs_dialog() -> PrefsWidgets {
         "打开登录窗",
     );
     login_btn.add_css_class("suggested-action");
+
     let token_row = adw::PasswordEntryRow::builder()
         .title("手动填入 Token（备用）")
         .show_apply_button(true)
         .build();
+    let token_badge = gtk::Label::new(Some("未填入"));
+    token_badge.set_valign(gtk::Align::Center);
+    token_badge.set_css_classes(&["token-badge", "caption", "dim-label"]);
+    token_row.add_suffix(&token_badge);
+
+    let badge_for_edit = token_badge.clone();
+    token_row.connect_changed(move |row| {
+        badge_for_edit.set_visible(row.text().is_empty());
+    });
+
     let auto_pause_row = adw::SwitchRow::builder()
         .title("停止加速时暂停时长")
         .subtitle("关机或停止服务时同样生效")
@@ -460,14 +650,25 @@ fn build_prefs_dialog() -> PrefsWidgets {
     page.add(&acct_prefs);
     page.add(&net_prefs);
     page.add(&maint_prefs);
-    let dialog = adw::PreferencesDialog::new();
-    dialog.set_title("设置");
-    dialog.add(&page);
+
+    let view = adw::ToolbarView::new();
+    view.add_top_bar(&adw::HeaderBar::new());
+    view.set_content(Some(&page));
+    let toasts = ToastDeck::wrap(&view);
+
+    let dialog = adw::Dialog::builder()
+        .title("设置")
+        .content_width(480)
+        .content_height(640)
+        .child(&toasts.overlay)
+        .build();
 
     PrefsWidgets {
         dialog,
+        login_row,
         login_btn,
         token_row,
+        token_badge,
         auto_pause_row,
         dns_row: dns_entry.clone().upcast(),
         dns_entry,
@@ -476,15 +677,11 @@ fn build_prefs_dialog() -> PrefsWidgets {
         restart_btn,
         repair_btn,
         cleanup_btn,
+        toasts,
     }
 }
 
 fn build_region_picker() -> RegionPicker {
-    let dialog = adw::Dialog::builder()
-        .title("选择加速区服")
-        .content_width(480)
-        .content_height(560)
-        .build();
     let filter_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     filter_bar.add_css_class("linked");
     filter_bar.set_halign(gtk::Align::Center);
@@ -511,9 +708,16 @@ fn build_region_picker() -> RegionPicker {
     let view = adw::ToolbarView::new();
     view.add_top_bar(&adw::HeaderBar::new());
     view.set_content(Some(&vbox));
-    dialog.set_child(Some(&view));
 
-    RegionPicker { dialog, filter_bar, list_box }
+    let toasts = ToastDeck::wrap(&view);
+    let dialog = adw::Dialog::builder()
+        .title("选择加速区服")
+        .content_width(480)
+        .content_height(560)
+        .child(&toasts.overlay)
+        .build();
+
+    RegionPicker { dialog, filter_bar, list_box, toasts }
 }
 
 impl MainWidgets {
@@ -569,8 +773,8 @@ impl MainWidgets {
         self.iface_val.set_text(&format!("{} · {}", snap.traffic_iface, snap.udp_6066));
     }
 
-    fn update_account_section(&self, acct: &AccountSnapshot) {
-        if acct.configured {
+    fn update_account_section(&self, pw: &PrefsWidgets, acct: &AccountSnapshot) {
+        if acct.configured && acct.valid {
             self.acct_row.set_title(&format!("{} 小时 {} 分", acct.hours, acct.mins));
             self.acct_row.set_subtitle(&format!(
                 "{} · {}",
@@ -578,10 +782,35 @@ impl MainWidgets {
                 if acct.paused { "已暂停" } else { "计时中" }
             ));
             self.acct_btn.set_label(if acct.paused { "恢复时长" } else { "暂停时长" });
+
+            pw.login_row.set_subtitle(&format!("当前已绑定：{} · 可重新登录切换账号", acct.sub_text));
+            pw.login_btn.set_label("重新登录");
+            pw.login_btn.remove_css_class("suggested-action");
+
+            pw.token_badge.set_text(if acct.has_ptoken { "已填入 · 自动续期" } else { "已填入" });
+            pw.token_badge.set_css_classes(&["token-badge", "caption", "success"]);
+        } else if acct.configured {
+            self.acct_row.set_title("账号凭证已失效");
+            self.acct_row.set_subtitle("点击右侧重新打开登录窗，自动刷新凭证与绑定");
+            self.acct_btn.set_label("重新登录");
+
+            pw.login_row.set_subtitle("当前凭证已过期，请点击右侧重新登录");
+            pw.login_btn.set_label("重新登录");
+            pw.login_btn.add_css_class("suggested-action");
+
+            pw.token_badge.set_text("已失效");
+            pw.token_badge.set_css_classes(&["token-badge", "caption", "warning"]);
         } else {
             self.acct_row.set_title("未登录雷神账号");
             self.acct_row.set_subtitle("点击右侧一键弹出登录小窗口，自动完成绑定与同步");
             self.acct_btn.set_label("登录账号");
+
+            pw.login_row.set_subtitle("弹出官方小窗口登录，自动提取凭证、绑定本机并永久自动续期");
+            pw.login_btn.set_label("打开登录窗");
+            pw.login_btn.add_css_class("suggested-action");
+
+            pw.token_badge.set_text("未填入");
+            pw.token_badge.set_css_classes(&["token-badge", "caption", "dim-label"]);
         }
     }
 
@@ -625,7 +854,7 @@ impl MainWidgets {
             self.loss_val.set_text("—");
         }
 
-        self.update_account_section(&st.account);
+        self.update_account_section(pw, &st.account);
         pw.auto_pause_row.set_active(st.account.auto_pause_on_stop);
         let gw_dns = if st.account.detected_gateway_dns.is_empty() {
             "223.5.5.5:53"
@@ -648,12 +877,18 @@ impl UiCtx {
         let _ = self.cmd_tx.send(cmd);
     }
 
+    fn present_prefs(&self) {
+        self.prefs_open.set(true);
+        self.pw.dialog.present(Some(&self.mw.win));
+    }
+
     fn toast(&self, msg: &str) {
-        let t = adw::Toast::new(msg);
-        if self.pw.dialog.is_mapped() {
-            self.pw.dialog.add_toast(t);
+        if self.prefs_open.get() {
+            self.pw.toasts.push(msg);
+        } else if self.picker_open.get() {
+            self.picker.toasts.push(msg);
         } else {
-            self.mw.toasts.add_toast(t);
+            self.mw.toasts.push(msg);
         }
     }
 
@@ -741,6 +976,7 @@ impl UiCtx {
 
     fn open_region_picker(&self) {
         self.rebuild_region_picker();
+        self.picker_open.set(true);
         self.picker.dialog.present(Some(&self.mw.win));
     }
 
@@ -752,6 +988,7 @@ impl UiCtx {
             self.mw.refresh_hero(&st);
             st.snap.is_accelerating && st.snap.active_area != area
         };
+        self.picker_open.set(false);
         self.picker.dialog.close();
         self.send(WorkerCmd::SaveLastArea(area.to_string()));
         if should_switch {
@@ -772,27 +1009,27 @@ impl UiCtx {
         match cmd {
             Some(c) => self.send(c),
             None => {
-                self.toast("请先选择加速区服");
                 self.open_region_picker();
+                self.toast("请先选择加速区服");
             }
         }
     }
 
     fn start_popup_login(&self, open_prefs_on_missing_browser: bool) {
         if find_chromium_binary().is_none() {
-            self.toast("未检测到 Chrome / Chromium / Edge 浏览器，请手动填入 Token");
             if open_prefs_on_missing_browser {
-                self.pw.dialog.present(Some(&self.mw.win));
+                self.present_prefs();
             }
+            self.toast("未检测到 Chrome / Chromium / Edge 浏览器，请手动填入 Token");
             return;
         }
         let auto_pause = self.pw.auto_pause_row.is_active();
         let tx = self.cmd_tx.clone();
         let evt_tx = self.evt_tx.clone();
-        self.toast("正在打开雷神登录小窗口，登录成功后将自动关闭...");
+        self.toast("正在打开雷神登录窗，登录后将自动关闭");
         thread::spawn(move || match run_browser_login_popup() {
             Ok(token) => {
-                let _ = evt_tx.send(WorkerEvent::Toast("已自动获取凭证，正在绑定设备并同步账号...".to_string()));
+                let _ = evt_tx.send(WorkerEvent::Toast("已自动获取凭证，正在绑定并同步账号...".to_string()));
                 let _ = tx.send(WorkerCmd::SaveToken { token, auto_pause });
             }
             Err(msg) => {
@@ -802,11 +1039,11 @@ impl UiCtx {
     }
 
     fn on_account_clicked(&self) {
-        let (configured, paused) = {
+        let (configured, valid, paused) = {
             let st = self.state.borrow();
-            (st.account.configured, st.account.paused)
+            (st.account.configured, st.account.valid, st.account.paused)
         };
-        if !configured {
+        if !configured || !valid {
             self.start_popup_login(true);
         } else if paused {
             self.send(WorkerCmd::RecoverAccount);
@@ -817,7 +1054,13 @@ impl UiCtx {
 
     fn bind_signals(&self) {
         let c = self.clone();
-        self.mw.settings_btn.connect_clicked(move |_| c.pw.dialog.present(Some(&c.mw.win)));
+        self.mw.settings_btn.connect_clicked(move |_| c.present_prefs());
+
+        let c = self.clone();
+        self.pw.dialog.connect_closed(move |_| c.prefs_open.set(false));
+
+        let c = self.clone();
+        self.picker.dialog.connect_closed(move |_| c.picker_open.set(false));
 
         let c = self.clone();
         self.mw.region_row.connect_activated(move |_| c.open_region_picker());
@@ -835,6 +1078,10 @@ impl UiCtx {
         self.pw.token_row.connect_apply(move |row| {
             let token = row.text().trim().to_string();
             row.set_text("");
+            if token.is_empty() {
+                c.toast("请先粘贴有效的 Token");
+                return;
+            }
             c.send(WorkerCmd::SaveToken { token, auto_pause: c.pw.auto_pause_row.is_active() });
         });
 
@@ -876,6 +1123,9 @@ fn build_ui(app: &adw::Application) {
         return;
     }
 
+    let mw = build_main_window(app);
+    install_app_css(&gtk::prelude::WidgetExt::display(&mw.win));
+
     let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCmd>();
     let (evt_tx, evt_rx) = mpsc::channel::<WorkerEvent>();
     spawn_worker(cmd_rx, evt_tx.clone());
@@ -883,7 +1133,9 @@ fn build_ui(app: &adw::Application) {
     let ctx = UiCtx {
         state: Rc::new(RefCell::new(GuiState::default())),
         suppress: Rc::new(Cell::new(false)),
-        mw: build_main_window(app),
+        prefs_open: Rc::new(Cell::new(false)),
+        picker_open: Rc::new(Cell::new(false)),
+        mw,
         pw: build_prefs_dialog(),
         picker: build_region_picker(),
         cmd_tx,
