@@ -47,13 +47,6 @@ const APP_CSS: &str = "
   transform: translateY(-12px) scale(0.94);
   opacity: 0;
 }
-row.acct-row label.title {
-  transition: filter 180ms ease, opacity 180ms ease;
-}
-row.acct-row.acct-name-hidden label.title {
-  filter: blur(5px);
-  opacity: 0.65;
-}
 ";
 
 enum WorkerEvent {
@@ -300,6 +293,12 @@ fn format_bytes(bytes: f64, decimals: usize) -> String {
 
 fn format_hms(secs: u64) -> String {
     format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+
+fn format_acct_subtitle(acct: &AccountSnapshot, name_visible: bool) -> String {
+    let state = if acct.paused { "已暂停" } else { "计时中" };
+    let who = if name_visible { acct.sub_text.as_str() } else { "••••••••" };
+    format!("{state} · {who}")
 }
 
 fn value_row(title: &str) -> (adw::ActionRow, gtk::Label) {
@@ -553,9 +552,6 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
     }
 
     let (acct_row, acct_btn) = button_row("—", "正在读取账号…", "恢复时长");
-    acct_row.add_css_class("property");
-    acct_row.add_css_class("acct-row");
-    acct_row.add_css_class("acct-name-hidden");
     let acct_group = adw::PreferencesGroup::builder().title("雷神账号").build();
     acct_group.add(&acct_row);
 
@@ -800,21 +796,10 @@ impl MainWidgets {
 
     fn update_account_section(&self, pw: &PrefsWidgets, acct: &AccountSnapshot, name_visible: bool) {
         if acct.configured && acct.valid {
-            self.acct_row.add_css_class("property");
             self.acct_row.set_activatable(true);
             self.acct_row.set_tooltip_text(Some("点击显示或隐藏账号名称"));
-            self.acct_row.set_title(&acct.sub_text);
-            if name_visible {
-                self.acct_row.remove_css_class("acct-name-hidden");
-            } else {
-                self.acct_row.add_css_class("acct-name-hidden");
-            }
-            self.acct_row.set_subtitle(&format!(
-                "{} 小时 {} 分 · {}",
-                acct.hours,
-                acct.mins,
-                if acct.paused { "已暂停" } else { "计时中" }
-            ));
+            self.acct_row.set_title(&format!("{} 小时 {} 分", acct.hours, acct.mins));
+            self.acct_row.set_subtitle(&format_acct_subtitle(acct, name_visible));
             self.acct_btn.set_label(if acct.paused { "恢复时长" } else { "暂停时长" });
 
             pw.login_row.set_subtitle(&format!("当前已绑定：{} · 可重新登录切换账号", acct.sub_text));
@@ -822,8 +807,6 @@ impl MainWidgets {
             pw.login_btn.remove_css_class("suggested-action");
             Self::sync_token_entry(pw, &acct.token_hint, false);
         } else if acct.configured {
-            self.acct_row.remove_css_class("property");
-            self.acct_row.remove_css_class("acct-name-hidden");
             self.acct_row.set_activatable(false);
             self.acct_row.set_tooltip_text(None);
             self.acct_row.set_title("账号凭证已失效");
@@ -835,8 +818,6 @@ impl MainWidgets {
             pw.login_btn.add_css_class("suggested-action");
             Self::sync_token_entry(pw, &acct.token_hint, true);
         } else {
-            self.acct_row.remove_css_class("property");
-            self.acct_row.remove_css_class("acct-name-hidden");
             self.acct_row.set_activatable(false);
             self.acct_row.set_tooltip_text(None);
             self.acct_row.set_title("未登录雷神账号");
@@ -1111,11 +1092,7 @@ impl UiCtx {
                 return;
             }
             st.acct_name_visible = !st.acct_name_visible;
-            if st.acct_name_visible {
-                row.remove_css_class("acct-name-hidden");
-            } else {
-                row.add_css_class("acct-name-hidden");
-            }
+            row.set_subtitle(&format_acct_subtitle(&st.account, st.acct_name_visible));
         });
 
         let c = self.clone();
