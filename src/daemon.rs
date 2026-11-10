@@ -855,16 +855,25 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
             let merged_geo_val = Value::Object(merged_geo.clone());
 
             for &target_area in &["hk", "jp", "kr", "tw", "sea", "us", "eu", "ru", "au"] {
-                let area_nodes = nodes_by_area.entry(target_area.to_string()).or_default();
+                let mut valid_geo_uris = BTreeSet::new();
                 for &gk in geo_sources(target_area) {
                     if let Some(arr) = merged_geo.get(gk).and_then(|v| v.as_array()) {
                         for u in arr.iter().filter_map(|x| x.as_str()) {
-                            if u != "direct" && !area_nodes.contains_key(u) {
-                                area_nodes.insert(
-                                    u.to_string(),
-                                    json!({"node": u, "ping": 25, "speed_sign": default_sign}),
-                                );
+                            if u != "direct" {
+                                valid_geo_uris.insert(u.to_string());
                             }
+                        }
+                    }
+                }
+                let area_nodes = nodes_by_area.entry(target_area.to_string()).or_default();
+                if !valid_geo_uris.is_empty() {
+                    area_nodes.retain(|u, _| valid_geo_uris.contains(u));
+                    for u in &valid_geo_uris {
+                        if !area_nodes.contains_key(u) {
+                            area_nodes.insert(
+                                u.clone(),
+                                json!({"node": u, "ping": 25, "speed_sign": default_sign}),
+                            );
                         }
                     }
                 }
@@ -1054,8 +1063,12 @@ pub fn scan_and_capture_active_profiles() -> Vec<Value> {
                     let game_area = parsed["game"]["area"]
                         .as_str()
                         .or_else(|| dev_val["game_area"].as_str())
-                        .unwrap_or("hk")
+                        .unwrap_or("")
+                        .trim()
                         .to_lowercase();
+                    if game_area.is_empty() || game_area == "-" || game_area == "auto" || game_area == "global" {
+                        continue;
+                    }
                     let entry = make_profile(
                         &game_area,
                         &raw_text,
