@@ -386,11 +386,25 @@ fn gateway_dns_label() -> String {
     if gw.is_empty() { "223.5.5.5:53".to_string() } else { format!("{gw}:53") }
 }
 
+fn mask_token_hint(tok: &str) -> String {
+    let chars: Vec<char> = tok.trim().chars().collect();
+    if chars.len() >= 8 {
+        let head: String = chars[..4].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{head}••••••••{tail}")
+    } else if chars.is_empty() {
+        String::new()
+    } else {
+        "••••••••".to_string()
+    }
+}
+
 pub fn fetch_account_snapshot() -> AccountSnapshot {
     let cfg = load_account_config();
     let p_tok = resolve_p_token(&cfg);
     let detected_gateway_dns = gateway_dns_label();
-    let configured = !cfg.account_token.trim().is_empty() || !p_tok.is_empty();
+    let raw_tok = if !p_tok.is_empty() { p_tok.as_str() } else { cfg.account_token.trim() };
+    let configured = !raw_tok.is_empty();
 
     if !configured {
         return AccountSnapshot {
@@ -405,6 +419,7 @@ pub fn fetch_account_snapshot() -> AccountSnapshot {
         };
     }
 
+    let token_hint = mask_token_hint(raw_tok);
     match webapi_post_with_auto_renew("/api/user/info") {
         Ok(res) if res["code"].as_i64() == Some(0) && res["data"].is_object() => {
             let d = &res["data"];
@@ -421,6 +436,7 @@ pub fn fetch_account_snapshot() -> AccountSnapshot {
             AccountSnapshot {
                 configured: true,
                 valid: true,
+                token_hint,
                 paused,
                 hours: sec / 3600,
                 mins: (sec % 3600) / 60,
@@ -433,6 +449,7 @@ pub fn fetch_account_snapshot() -> AccountSnapshot {
         _ => AccountSnapshot {
             configured: true,
             valid: false,
+            token_hint,
             paused: true,
             sub_text: "Token 已过期".to_string(),
             auto_pause_on_stop: cfg.auto_pause_on_stop,

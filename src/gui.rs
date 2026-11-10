@@ -47,11 +47,6 @@ const APP_CSS: &str = "
   transform: translateY(-12px) scale(0.94);
   opacity: 0;
 }
-.token-badge {
-  padding: 3px 8px;
-  border-radius: 999px;
-  background-color: color-mix(in srgb, currentColor 12%, transparent);
-}
 ";
 
 enum WorkerEvent {
@@ -240,7 +235,6 @@ struct PrefsWidgets {
     login_row: adw::ActionRow,
     login_btn: gtk::Button,
     token_row: adw::PasswordEntryRow,
-    token_badge: gtk::Label,
     auto_pause_row: adw::SwitchRow,
     dns_row: gtk::Editable,
     dns_entry: adw::EntryRow,
@@ -611,15 +605,17 @@ fn build_prefs_dialog() -> PrefsWidgets {
         .title("手动填入 Token（备用）")
         .show_apply_button(true)
         .build();
-    let token_badge = gtk::Label::new(Some("未填入"));
-    token_badge.set_valign(gtk::Align::Center);
-    token_badge.set_css_classes(&["token-badge", "caption", "dim-label"]);
-    token_row.add_suffix(&token_badge);
-
-    let badge_for_edit = token_badge.clone();
-    token_row.connect_changed(move |row| {
-        badge_for_edit.set_visible(row.text().is_empty());
-    });
+    if let Some(delegate) = gtk::prelude::EditableExt::delegate(&token_row) {
+        let row_for_focus = token_row.clone();
+        delegate.connect_has_focus_notify(move |w| {
+            if w.has_focus() && row_for_focus.text().contains('•') {
+                let r = row_for_focus.clone();
+                glib::idle_add_local_once(move || {
+                    r.select_region(0, -1);
+                });
+            }
+        });
+    }
 
     let auto_pause_row = adw::SwitchRow::builder()
         .title("停止加速时暂停时长")
@@ -668,7 +664,6 @@ fn build_prefs_dialog() -> PrefsWidgets {
         login_row,
         login_btn,
         token_row,
-        token_badge,
         auto_pause_row,
         dns_row: dns_entry.clone().upcast(),
         dns_entry,
@@ -773,6 +768,26 @@ impl MainWidgets {
         self.iface_val.set_text(&format!("{} · {}", snap.traffic_iface, snap.udp_6066));
     }
 
+    fn sync_token_entry(pw: &PrefsWidgets, hint: &str, expired: bool) {
+        pw.token_row.set_title(if expired {
+            "手动填入 Token（凭证已失效）"
+        } else {
+            "手动填入 Token（备用）"
+        });
+        if expired {
+            pw.token_row.add_css_class("error");
+        } else {
+            pw.token_row.remove_css_class("error");
+        }
+        let focused = gtk::prelude::EditableExt::delegate(&pw.token_row)
+            .is_some_and(|w| w.has_focus());
+        if !focused && pw.token_row.text() != hint {
+            pw.token_row.set_show_apply_button(false);
+            pw.token_row.set_text(hint);
+            pw.token_row.set_show_apply_button(true);
+        }
+    }
+
     fn update_account_section(&self, pw: &PrefsWidgets, acct: &AccountSnapshot) {
         if acct.configured && acct.valid {
             self.acct_row.set_title(&format!("{} 小时 {} 分", acct.hours, acct.mins));
@@ -786,9 +801,7 @@ impl MainWidgets {
             pw.login_row.set_subtitle(&format!("当前已绑定：{} · 可重新登录切换账号", acct.sub_text));
             pw.login_btn.set_label("重新登录");
             pw.login_btn.remove_css_class("suggested-action");
-
-            pw.token_badge.set_text("已填入");
-            pw.token_badge.set_css_classes(&["token-badge", "caption", "success"]);
+            Self::sync_token_entry(pw, &acct.token_hint, false);
         } else if acct.configured {
             self.acct_row.set_title("账号凭证已失效");
             self.acct_row.set_subtitle("点击右侧重新打开登录窗，自动刷新凭证与绑定");
@@ -797,9 +810,7 @@ impl MainWidgets {
             pw.login_row.set_subtitle("当前凭证已过期，请点击右侧重新登录");
             pw.login_btn.set_label("重新登录");
             pw.login_btn.add_css_class("suggested-action");
-
-            pw.token_badge.set_text("已失效");
-            pw.token_badge.set_css_classes(&["token-badge", "caption", "warning"]);
+            Self::sync_token_entry(pw, &acct.token_hint, true);
         } else {
             self.acct_row.set_title("未登录雷神账号");
             self.acct_row.set_subtitle("点击右侧一键弹出登录小窗口，自动完成绑定与同步");
@@ -808,9 +819,7 @@ impl MainWidgets {
             pw.login_row.set_subtitle("弹出官方小窗口登录，自动提取凭证并绑定本机");
             pw.login_btn.set_label("打开登录窗");
             pw.login_btn.add_css_class("suggested-action");
-
-            pw.token_badge.set_text("未填入");
-            pw.token_badge.set_css_classes(&["token-badge", "caption", "dim-label"]);
+            Self::sync_token_entry(pw, "", false);
         }
     }
 
@@ -1074,14 +1083,34 @@ impl UiCtx {
         let c = self.clone();
         self.pw.login_btn.connect_clicked(move |_| c.start_popup_login(false));
 
+        if let Some(delegate) = gtk::prelude::EditableExt::delegate(&self.pw.token_row) {
+            let c = self.clone();
+            delegate.connect_has_focus_notify(move |w| {
+                if !w.has_focus() && c.pw.token_row.text().trim().is_empty() {
+                    let st = c.state.borrow();
+                    MainWidgets::sync_token_entry(
+                        &c.pw,
+                        &st.account.token_hint,
+                        st.account.configured && !st.account.valid,
+                    );
+                }
+            });
+        }
+
         let c = self.clone();
         self.pw.token_row.connect_apply(move |row| {
             let token = row.text().trim().to_string();
-            row.set_text("");
-            if token.is_empty() {
-                c.toast("请先粘贴有效的 Token");
+            if token.is_empty() || token.contains('•') {
+                c.toast("请粘贴完整的新 Token");
+                let st = c.state.borrow();
+                MainWidgets::sync_token_entry(
+                    &c.pw,
+                    &st.account.token_hint,
+                    st.account.configured && !st.account.valid,
+                );
                 return;
             }
+            row.set_text("");
             c.send(WorkerCmd::SaveToken { token, auto_pause: c.pw.auto_pause_row.is_active() });
         });
 
