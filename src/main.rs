@@ -105,8 +105,8 @@ Leinux — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
 
 选项:
   (无参数)             自动拉起后台服务并打开原生 GTK4 控制面板窗口
-  --start [AREA]       免开界面直接恢复时长并启动加速 (默认: hk)
-  --list               按大洲分类列出云端动态同步的全部可用区服及节点数
+  --start [AREA]       免开界面恢复时长并启动加速 (不传参数则使用上次选择的区服)
+  --list               按七大洲分类列出云端动态同步的全部可用区服及节点数
   --pause              仅断开加速隧道并暂停官网账号时长 (保持后台服务运行)
   --stop               暂停官网账号时长并停止后台服务
   --status             查看服务运行状态、当前加速区服与账号剩余时长
@@ -150,8 +150,9 @@ fn cmd_start(area: &str) -> i32 {
     ensure_services();
     match http_request("POST", "/api/acc/start", Some(&json!({"area": area, "recover": true})), 10000) {
         Ok(res) if res["ok"].as_bool() == Some(true) => {
-            let name = res["name"].as_str().unwrap_or(&area);
-            println!("已恢复时长并启动加速: {name} ({area})");
+            let resolved_area = res["area"].as_str().unwrap_or(&area);
+            let name = res["name"].as_str().unwrap_or(resolved_area);
+            println!("已恢复时长并启动加速: {name} ({resolved_area})");
             0
         }
         Ok(res) => {
@@ -269,7 +270,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => print_help(),
         Some("--daemon") => daemon::run_daemon(),
-        Some("--start") => process::exit(cmd_start(args.get(1).map(String::as_str).unwrap_or("hk"))),
+        Some("--start") => process::exit(cmd_start(args.get(1).map(String::as_str).unwrap_or(""))),
         Some("--list" | "--regions") => process::exit(cmd_list()),
         Some("--pause") => process::exit(cmd_pause()),
         Some("--stop") => process::exit(cmd_stop()),

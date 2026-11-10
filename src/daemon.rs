@@ -95,6 +95,7 @@ fn build_daemon_snapshot(known_rev: u64, include_account: bool) -> DaemonSnapsho
     let has_gameacc_chain = check_firewall_residuals();
     let (stored_profiles, rev) = scan_profiles();
     let (is_accelerating, active_area, net_delay, loss_rate) = query_active_acc_state(&token);
+    let last_area = load_account_config().last_area;
 
     let profiles = if known_rev == rev && known_rev != 0 {
         None
@@ -118,6 +119,7 @@ fn build_daemon_snapshot(known_rev: u64, include_account: bool) -> DaemonSnapsho
         user_id,
         is_accelerating,
         active_area,
+        last_area,
         net_delay,
         loss_rate,
         profiles_rev: rev,
@@ -147,6 +149,7 @@ fn build_legacy_host_status() -> Value {
         "token": snap.token,
         "user_id": snap.user_id,
         "profiles": stored_profiles,
+        "last_area": acct_cfg.last_area,
         "has_account_token": has_account_token,
         "auto_pause_on_stop": acct_cfg.auto_pause_on_stop,
     })
@@ -184,6 +187,12 @@ fn execute_start_for_conf(
 
     let dns_list = resolve_local_dns_list(&acct_cfg.custom_dns);
     let (sanitized, _) = sanitize_acc_conf(raw_conf, &dns_list);
+    let area = sanitized["game"]["area"].as_str().unwrap_or("").trim().to_lowercase();
+    if !area.is_empty() && acct_cfg.last_area != area {
+        let mut updated_cfg = acct_cfg.clone();
+        updated_cfg.last_area = area;
+        save_account_config(&updated_cfg);
+    }
     let live_conf = prepare_live_conf(sanitized, &p_tok, uid);
 
     install_mangle_guard();
@@ -212,7 +221,19 @@ fn execute_start_for_conf(
 }
 
 fn handle_acc_start(req_json: &Value) -> (u16, Value) {
-    let area = req_json["area"].as_str().unwrap_or("hk").trim().to_lowercase();
+    let mut area = req_json["area"].as_str().unwrap_or("").trim().to_lowercase();
+    if area.is_empty() {
+        area = load_account_config().last_area.trim().to_lowercase();
+    }
+    if area.is_empty() {
+        return (
+            400,
+            json!({
+                "ok": false,
+                "msg": "未选择加速区服，首次使用请先选择区服（或执行 lgd --start <区服代号>，可用 lgd --list 查看），后续将自动记住上次选择"
+            }),
+        );
+    }
     let (profiles, _) = scan_profiles();
     let Some(prof) = profiles.iter().find(|p| p.summary.area.eq_ignore_ascii_case(&area)) else {
         let avail: Vec<&str> = profiles.iter().map(|p| p.summary.area.as_str()).collect();
@@ -320,9 +341,11 @@ fn extract_raw_token(input: &str) -> String {
 
 fn handle_save_token(req_json: &Value) -> Value {
     let mut cfg = load_account_config();
+    let mut need_web_check = false;
     if let Some(raw_tok) = req_json["account_token"].as_str() {
         let tok = extract_raw_token(raw_tok);
         if !tok.is_empty() {
+            need_web_check = true;
             if is_valid_ptoken(&tok) {
                 cfg.p_token = tok.clone();
                 if let Some((web_tok, uid)) = exchange_ptoken_for_web_token(&tok) {
@@ -344,6 +367,9 @@ fn handle_save_token(req_json: &Value) -> Value {
     if let Some(ap) = req_json["auto_pause_on_stop"].as_bool() {
         cfg.auto_pause_on_stop = ap;
     }
+    if let Some(la) = req_json.get("last_area").and_then(Value::as_str) {
+        cfg.last_area = la.trim().to_lowercase();
+    }
     let dns_changed = if let Some(cdns) = req_json.get("custom_dns").and_then(Value::as_str) {
         cfg.custom_dns = cdns.trim().to_string();
         true
@@ -352,16 +378,23 @@ fn handle_save_token(req_json: &Value) -> Value {
     };
 
     save_account_config(&cfg);
-    invalidate_profile_cache();
+    if need_web_check || dns_changed {
+        invalidate_profile_cache();
+    }
     if dns_changed {
         let _ = scan_profiles();
     }
 
-    let info = webapi_post_with_auto_renew("/api/user/info").unwrap_or_else(|_| json!({}));
+    let info = if need_web_check {
+        webapi_post_with_auto_renew("/api/user/info").unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
     json!({
         "ok": true,
         "auto_pause_on_stop": cfg.auto_pause_on_stop,
         "custom_dns": cfg.custom_dns,
+        "last_area": cfg.last_area,
         "response": info,
     })
 }

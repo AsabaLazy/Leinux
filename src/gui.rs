@@ -21,6 +21,7 @@ enum WorkerEvent {
 
 enum WorkerCmd {
     StartArea(String, String),
+    SaveLastArea(String),
     PauseAccount,
     RecoverAccount,
     SaveToken(String, bool),
@@ -45,10 +46,10 @@ struct GuiState {
 
 impl GuiState {
     fn selected_profile(&self) -> Option<&ProfileSummary> {
-        self.profiles
-            .iter()
-            .find(|p| p.area == self.selected_area)
-            .or_else(|| self.profiles.first())
+        if self.selected_area.is_empty() {
+            return None;
+        }
+        self.profiles.iter().find(|p| p.area == self.selected_area)
     }
 }
 
@@ -176,6 +177,10 @@ fn handle_worker_cmd(cmd: WorkerCmd, evt_tx: &mpsc::Sender<WorkerEvent>, known_r
                 Err(_) => toast("启动加速失败".to_string()),
             }
             refresh_account = true;
+        }
+        WorkerCmd::SaveLastArea(area) => {
+            let _ = http_request("POST", "/api/account/save-token", Some(&json!({"last_area": area})), 3000);
+            return;
         }
         WorkerCmd::PauseAccount => {
             toast("正在断开隧道并暂停账号时长...".to_string());
@@ -330,7 +335,7 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
     hero.append(&main_btn);
 
     let region_row = adw::ActionRow::builder().title("区服").activatable(true).build();
-    let region_val = gtk::Label::new(Some("亚洲 · 中国香港"));
+    let region_val = gtk::Label::new(Some("未选择"));
     region_val.add_css_class("dim-label");
     let region_arrow = gtk::Image::from_icon_name("go-next-symbolic");
     region_arrow.add_css_class("dim-label");
@@ -544,6 +549,7 @@ fn build_region_dialog(
                             )
                         };
                         dlg.close();
+                        let _ = tx.send(WorkerCmd::SaveLastArea(area.clone()));
                         if should_switch {
                             let _ = tx.send(WorkerCmd::StartArea(area, name));
                         }
@@ -616,6 +622,8 @@ impl MainWidgets {
     fn update_region_label(&self, st: &GuiState) {
         if let Some(p) = st.selected_profile() {
             self.region_val.set_text(&format!("{} · {}", p.continent, p.name));
+        } else {
+            self.region_val.set_text("未选择");
         }
     }
 
@@ -679,10 +687,16 @@ impl MainWidgets {
 
         if snap.is_accelerating && !snap.active_area.is_empty() {
             st.selected_area = snap.active_area.clone();
-        } else if !st.profiles.iter().any(|p| p.area == st.selected_area) {
-            if let Some(first) = st.profiles.first() {
-                st.selected_area = first.area.clone();
-            }
+        } else if st.selected_area.is_empty()
+            && !snap.last_area.is_empty()
+            && st.profiles.iter().any(|p| p.area == snap.last_area)
+        {
+            st.selected_area = snap.last_area.clone();
+        } else if !st.selected_area.is_empty()
+            && !st.profiles.is_empty()
+            && !st.profiles.iter().any(|p| p.area == st.selected_area)
+        {
+            st.selected_area.clear();
         }
 
         if snap.is_accelerating {
@@ -742,10 +756,7 @@ fn build_ui(app: &adw::Application) {
 
     let mw = build_main_window(app);
     let pw = build_prefs_dialog();
-    let state = Rc::new(RefCell::new(GuiState {
-        selected_area: "hk".to_string(),
-        ..Default::default()
-    }));
+    let state = Rc::new(RefCell::new(GuiState::default()));
     let suppress = Rc::new(Cell::new(false));
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCmd>();
@@ -777,12 +788,28 @@ fn build_ui(app: &adw::Application) {
     }
     {
         let (tx, st) = (cmd_tx.clone(), state.clone());
+        let (dlg, win, rebuild, toast) = (
+            region_dialog.clone(),
+            mw.win.clone(),
+            rebuild_region_dialog.clone(),
+            toast.clone(),
+        );
         mw.main_btn.connect_clicked(move |_| {
-            let cur = st.borrow();
-            if cur.snap.is_accelerating {
-                let _ = tx.send(WorkerCmd::PauseAccount);
-            } else if let Some(p) = cur.selected_profile() {
-                let _ = tx.send(WorkerCmd::StartArea(p.area.clone(), p.name.clone()));
+            let action = {
+                let cur = st.borrow();
+                if cur.snap.is_accelerating {
+                    Some(WorkerCmd::PauseAccount)
+                } else {
+                    cur.selected_profile()
+                        .map(|p| WorkerCmd::StartArea(p.area.clone(), p.name.clone()))
+                }
+            };
+            if let Some(cmd) = action {
+                let _ = tx.send(cmd);
+            } else {
+                toast("请先选择加速区服");
+                rebuild();
+                dlg.present(Some(&win));
             }
         });
     }

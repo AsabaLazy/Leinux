@@ -2,7 +2,7 @@ use crate::net::{find_plugin_pid, read_ini_values, resolve_local_dns_list, state
 use crate::rpc::{curl_json, is_valid_ptoken, load_account_config};
 use crate::types::{
     canonical_geo_keys, format_region_continent, format_region_title, is_internal_geo_key,
-    region_sort_rank, ProfileSummary, StoredProfile, APP_ID, BUSI_TYPE, FALLBACK_SIGN, LEIGOD_DIR,
+    profile_sort_key, ProfileSummary, StoredProfile, APP_ID, BUSI_TYPE, FALLBACK_SIGN, LEIGOD_DIR,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -294,6 +294,7 @@ pub fn consolidate_regional_profiles(
         }
     }
 
+    let prev_order: Vec<String> = profiles.iter().map(|p| p.summary.area.clone()).collect();
     let mut by_area: BTreeMap<String, StoredProfile> = BTreeMap::new();
     let mut nodes_by_area: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
     let mut changed = geo_dirty;
@@ -426,11 +427,10 @@ pub fn consolidate_regional_profiles(
     }
 
     let mut ordered: Vec<StoredProfile> = by_area.into_values().collect();
-    ordered.sort_by(|a, b| {
-        region_sort_rank(&a.summary.area)
-            .cmp(&region_sort_rank(&b.summary.area))
-            .then_with(|| a.summary.area.cmp(&b.summary.area))
-    });
+    ordered.sort_by_key(|p| profile_sort_key(&p.summary));
+    if !changed && ordered.iter().map(|p| p.summary.area.as_str()).ne(prev_order.iter().map(String::as_str)) {
+        changed = true;
+    }
     (ordered, changed)
 }
 

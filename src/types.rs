@@ -49,6 +49,8 @@ pub struct AccountConfig {
     pub auto_pause_on_stop: bool,
     #[serde(default)]
     pub custom_dns: String,
+    #[serde(default)]
+    pub last_area: String,
 }
 
 impl Default for AccountConfig {
@@ -59,6 +61,7 @@ impl Default for AccountConfig {
             user_id: String::new(),
             auto_pause_on_stop: true,
             custom_dns: String::new(),
+            last_area: String::new(),
         }
     }
 }
@@ -118,6 +121,8 @@ pub struct DaemonSnapshot {
     pub user_id: String,
     pub is_accelerating: bool,
     pub active_area: String,
+    #[serde(default)]
+    pub last_area: String,
     pub net_delay: i64,
     pub loss_rate: String,
     pub profiles_rev: u64,
@@ -178,16 +183,24 @@ pub fn format_region_continent(area: &str) -> &'static str {
     }
 }
 
-pub fn region_sort_rank(area: &str) -> usize {
-    const ORDER: &[&str] = &[
-        "hk", "tw", "jp", "kr", "sea", "my", "vn", "ph", "idn", "ind", "pk", "tr", "kaz", "asia",
-        "de", "eu", "ru", "ua",
-        "us", "mx",
-        "br", "arg",
-        "au",
-    ];
-    let low = area.trim().to_lowercase();
-    ORDER.iter().position(|&k| k == low).unwrap_or(999)
+pub fn is_continent_wide_area(area: &str) -> bool {
+    matches!(
+        area.trim().to_lowercase().as_str(),
+        "asia" | "eu" | "na" | "sa" | "oc" | "af" | "an"
+    )
+}
+
+pub fn continent_sort_rank(continent: &str) -> usize {
+    CONTINENT_ORDER.iter().position(|&c| c == continent).unwrap_or(99)
+}
+
+pub fn profile_sort_key(p: &ProfileSummary) -> (usize, bool, std::cmp::Reverse<usize>, String) {
+    (
+        continent_sort_rank(&p.continent),
+        !is_continent_wide_area(&p.area),
+        std::cmp::Reverse(p.node_count),
+        p.area.clone(),
+    )
 }
 
 pub fn canonical_geo_keys(area: &str) -> Vec<String> {
