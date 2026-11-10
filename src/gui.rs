@@ -602,7 +602,7 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
 fn build_prefs_dialog() -> PrefsWidgets {
     let (login_row, login_btn) = button_row(
         "网页一键登录",
-        "弹出官方小窗口登录，自动提取凭证、绑定本机并永久自动续期",
+        "弹出官方小窗口登录，自动提取凭证并绑定本机",
         "打开登录窗",
     );
     login_btn.add_css_class("suggested-action");
@@ -787,7 +787,7 @@ impl MainWidgets {
             pw.login_btn.set_label("重新登录");
             pw.login_btn.remove_css_class("suggested-action");
 
-            pw.token_badge.set_text(if acct.has_ptoken { "已填入 · 自动续期" } else { "已填入" });
+            pw.token_badge.set_text("已填入");
             pw.token_badge.set_css_classes(&["token-badge", "caption", "success"]);
         } else if acct.configured {
             self.acct_row.set_title("账号凭证已失效");
@@ -805,7 +805,7 @@ impl MainWidgets {
             self.acct_row.set_subtitle("点击右侧一键弹出登录小窗口，自动完成绑定与同步");
             self.acct_btn.set_label("登录账号");
 
-            pw.login_row.set_subtitle("弹出官方小窗口登录，自动提取凭证、绑定本机并永久自动续期");
+            pw.login_row.set_subtitle("弹出官方小窗口登录，自动提取凭证并绑定本机");
             pw.login_btn.set_label("打开登录窗");
             pw.login_btn.add_css_class("suggested-action");
 

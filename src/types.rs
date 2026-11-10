@@ -137,8 +137,6 @@ pub struct AccountSnapshot {
     pub configured: bool,
     #[serde(default)]
     pub valid: bool,
-    #[serde(default)]
-    pub has_ptoken: bool,
     pub paused: bool,
     pub hours: i64,
     pub mins: i64,

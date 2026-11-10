@@ -389,15 +389,13 @@ fn gateway_dns_label() -> String {
 pub fn fetch_account_snapshot() -> AccountSnapshot {
     let cfg = load_account_config();
     let p_tok = resolve_p_token(&cfg);
-    let has_ptoken = !p_tok.is_empty();
     let detected_gateway_dns = gateway_dns_label();
-    let configured = !cfg.account_token.trim().is_empty() || has_ptoken;
+    let configured = !cfg.account_token.trim().is_empty() || !p_tok.is_empty();
 
     if !configured {
         return AccountSnapshot {
             configured: false,
             valid: false,
-            has_ptoken: false,
             paused: true,
             sub_text: "未配置 Token".to_string(),
             auto_pause_on_stop: cfg.auto_pause_on_stop,
@@ -423,7 +421,6 @@ pub fn fetch_account_snapshot() -> AccountSnapshot {
             AccountSnapshot {
                 configured: true,
                 valid: true,
-                has_ptoken,
                 paused,
                 hours: sec / 3600,
                 mins: (sec % 3600) / 60,
@@ -436,7 +433,6 @@ pub fn fetch_account_snapshot() -> AccountSnapshot {
         _ => AccountSnapshot {
             configured: true,
             valid: false,
-            has_ptoken,
             paused: true,
             sub_text: "Token 已过期".to_string(),
             auto_pause_on_stop: cfg.auto_pause_on_stop,
