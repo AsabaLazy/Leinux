@@ -124,6 +124,7 @@ pub fn ws_rpc_call(host: &str, port: u16, path: &str, payload: &Value, timeout_m
         .map_err(|e| format!("Invalid address: {e}"))?;
     let timeout = Duration::from_millis(timeout_ms);
     let mut sock = TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
+    let _ = sock.set_nodelay(true);
     let _ = sock.set_read_timeout(Some(timeout));
     let _ = sock.set_write_timeout(Some(timeout));
 
@@ -135,7 +136,7 @@ pub fn ws_rpc_call(host: &str, port: u16, path: &str, payload: &Value, timeout_m
          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
          Sec-WebSocket-Version: 13\r\n\r\n"
     );
-    sock.write_allhandshake_and_body(&handshake, payload)?;
+    sock.write_all(handshake.as_bytes()).map_err(|e| e.to_string())?;
 
     let mut reader = BufReader::with_capacity(4096, sock.try_clone().map_err(|e| e.to_string())?);
     let mut status_line = String::new();
@@ -150,6 +151,9 @@ pub fn ws_rpc_call(host: &str, port: u16, path: &str, payload: &Value, timeout_m
             break;
         }
     }
+
+    let body = payload.to_string().into_bytes();
+    write_ws_frame(&mut sock, 0x1, &body)?;
 
     loop {
         let mut hdr = [0u8; 2];
@@ -185,18 +189,6 @@ pub fn ws_rpc_call(host: &str, port: u16, path: &str, payload: &Value, timeout_m
             0xA => continue,
             _ => return serde_json::from_slice(&data).map_err(|e| e.to_string()),
         }
-    }
-}
-
-trait WsWriteExt {
-    fn write_allhandshake_and_body(&mut self, handshake: &str, payload: &Value) -> Result<(), String>;
-}
-
-impl WsWriteExt for TcpStream {
-    fn write_allhandshake_and_body(&mut self, handshake: &str, payload: &Value) -> Result<(), String> {
-        self.write_all(handshake.as_bytes()).map_err(|e| e.to_string())?;
-        let body = payload.to_string().into_bytes();
-        write_ws_frame(self, 0x1, &body)
     }
 }
 

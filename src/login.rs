@@ -244,7 +244,9 @@ pub fn run_browser_login_popup() -> Result<String, String> {
                 for ck in cookies {
                     let name = ck["name"].as_str().unwrap_or("");
                     let domain = ck["domain"].as_str().unwrap_or("");
-                    if name == "AuthToken" && (domain.contains("xxghh") || domain.contains("nn.com")) {
+                    if name == "AuthToken"
+                        && (domain.contains("xxghh") || domain.contains("nn.com") || domain.contains("leigod"))
+                    {
                         if let Some(val) = ck["value"].as_str().and_then(decode_auth_token_cookie) {
                             let _ = ws_rpc_call(
                                 "127.0.0.1",
@@ -287,5 +289,86 @@ mod tests {
         );
         assert_eq!(decode_auth_token_cookie("not-a-valid-token"), None);
         assert_eq!(decode_auth_token_cookie(""), None);
+    }
+
+    #[test]
+    fn test_real_chromium_cdp_ws_rpc_call() {
+        let Some(browser) = find_chromium_binary() else {
+            return;
+        };
+        let profile_dir = create_login_profile_dir().expect("create temp profile");
+        let child = Command::new(browser)
+            .args([
+                "--headless=new",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--password-store=basic",
+                "--disable-extensions",
+                "--remote-debugging-port=0",
+                &format!("--user-data-dir={}", profile_dir.display()),
+                "about:blank",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn headless browser");
+        let guard = PopupGuard {
+            child: Some(child),
+            profile_dir,
+        };
+        let mut endpoint = None;
+        for _ in 0..80 {
+            if let Some(ep) = read_devtools_endpoint(&guard.profile_dir) {
+                endpoint = Some(ep);
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let (port, ws_path) = endpoint.expect("DevToolsActivePort endpoint");
+        ws_rpc_call(
+            "127.0.0.1",
+            port,
+            &ws_path,
+            &json!({
+                "id": 1,
+                "method": "Storage.setCookies",
+                "params": {
+                    "cookies": [{
+                        "name": "AuthToken",
+                        "value": "MjIwYmVlOGFmM2E2NDUyYjk0MTMzMDUxMTQwZThkYTI%3D",
+                        "domain": "www.xxghh.biz",
+                        "path": "/"
+                    }]
+                }
+            }),
+            1500,
+        )
+        .expect("Storage.setCookies via ws_rpc_call");
+
+        let resp = ws_rpc_call(
+            "127.0.0.1",
+            port,
+            &ws_path,
+            &json!({"id": 2, "method": "Storage.getCookies"}),
+            1500,
+        )
+        .expect("Storage.getCookies via ws_rpc_call");
+
+        let cookies = resp["result"]["cookies"].as_array().expect("cookies array");
+        let extracted = cookies
+            .iter()
+            .filter(|ck| ck["name"].as_str() == Some("AuthToken"))
+            .find_map(|ck| ck["value"].as_str().and_then(decode_auth_token_cookie));
+        assert_eq!(extracted.as_deref(), Some("220bee8af3a6452b94133051140e8da2"));
+
+        let _ = ws_rpc_call(
+            "127.0.0.1",
+            port,
+            &ws_path,
+            &json!({"id": 3, "method": "Browser.close"}),
+            500,
+        );
+        drop(guard);
     }
 }
