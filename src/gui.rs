@@ -17,6 +17,8 @@ const SPARK_POINTS: usize = 30;
 struct ProfileItem {
     name: String,
     area: String,
+    continent: String,
+    node_count: usize,
     catalog: i64,
     sub_catalog: i64,
     conf: Value,
@@ -99,9 +101,15 @@ fn fetch_snapshot(include_account: bool, prev_acct: Option<&PollSnapshot>) -> Op
                         Value::String(s) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
                         other => other.clone(),
                     };
+                    let area_str = p["area"].as_str().unwrap_or("hk").to_lowercase();
                     ProfileItem {
                         name: p["name"].as_str().unwrap_or("中国香港").to_string(),
-                        area: p["area"].as_str().unwrap_or("hk").to_lowercase(),
+                        continent: p["continent"]
+                            .as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| crate::daemon::format_region_continent(&area_str).to_string()),
+                        area: area_str,
+                        node_count: p["nodeCount"].as_u64().unwrap_or(0) as usize,
                         catalog: p["catalog"].as_i64().unwrap_or(2),
                         sub_catalog: p["subCatalog"].as_i64().unwrap_or(0),
                         conf: conf_val,
@@ -373,8 +381,16 @@ fn build_ui(app: &adw::Application) {
     hero.append(&status_sub);
     hero.append(&main_btn);
 
-    let region_model = gtk::StringList::new(&[]);
-    let region_row = adw::ComboRow::builder().title("区服").model(&region_model).build();
+    let region_row = adw::ActionRow::builder()
+        .title("区服")
+        .activatable(true)
+        .build();
+    let region_val = gtk::Label::new(Some("东亚·港澳台 · 中国香港"));
+    region_val.add_css_class("dim-label");
+    let region_arrow = gtk::Image::from_icon_name("go-next-symbolic");
+    region_arrow.add_css_class("dim-label");
+    region_row.add_suffix(&region_val);
+    region_row.add_suffix(&region_arrow);
     let region_group = adw::PreferencesGroup::builder().title("加速区服").build();
     region_group.add(&region_row);
 
@@ -438,7 +454,7 @@ fn build_ui(app: &adw::Application) {
     net_prefs.add(&dns_row);
 
     let (refresh_nodes_row, refresh_nodes_btn) =
-        button_row("同步云端节点", "直接从雷神云端拉取 9 大区服最新节点（免手机）", "同步");
+        button_row("同步云端节点", "直接从雷神云端动态拉取全部区服最新节点（免手机）", "同步");
     let (restart_row, restart_btn) = button_row("重启守护服务", "重启 leigod_plugin 服务", "重启");
     let (repair_row, repair_btn) = button_row("修复设备绑定", "重新向雷神同步本机设备", "修复");
     let (cleanup_row, cleanup_btn) = button_row("清理防火墙规则", "移除残留的 iptables 规则", "清理");
@@ -652,11 +668,68 @@ fn build_ui(app: &adw::Application) {
     let ui_state: Rc<RefCell<PollSnapshot>> = Rc::new(RefCell::new(PollSnapshot::default()));
     let started_at: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
     let suppress = Rc::new(Cell::new(false));
+    let selected_area: Rc<RefCell<String>> = Rc::new(RefCell::new("hk".to_string()));
+    let continent_filter: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+
+    // Region selector dialog with continent segmented filter bar.
+    let region_dialog = adw::Dialog::builder()
+        .title("选择加速区服")
+        .content_width(440)
+        .content_height(560)
+        .build();
+    let r_header = adw::HeaderBar::new();
+    let filter_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    filter_bar.add_css_class("linked");
+    filter_bar.set_halign(gtk::Align::Center);
+    filter_bar.set_margin_top(6);
+    filter_bar.set_margin_bottom(8);
+    filter_bar.set_margin_start(12);
+    filter_bar.set_margin_end(12);
+
+    let r_list_box = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    r_list_box.set_margin_top(6);
+    r_list_box.set_margin_bottom(18);
+    r_list_box.set_margin_start(12);
+    r_list_box.set_margin_end(12);
+    let r_clamp = adw::Clamp::builder().maximum_size(500).child(&r_list_box).build();
+    let r_scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&r_clamp)
+        .build();
+    let r_vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    r_vbox.append(&filter_bar);
+    r_vbox.append(&r_scroller);
+    let r_view = adw::ToolbarView::new();
+    r_view.add_top_bar(&r_header);
+    r_view.set_content(Some(&r_vbox));
+    region_dialog.set_child(Some(&r_view));
 
     let selected_profile = {
         let st = ui_state.clone();
-        let row = region_row.clone();
-        move || -> Option<ProfileItem> { st.borrow().profiles.get(row.selected() as usize).cloned() }
+        let sel = selected_area.clone();
+        move || -> Option<ProfileItem> {
+            let cur = st.borrow();
+            let target = sel.borrow();
+            cur.profiles
+                .iter()
+                .find(|p| p.area == *target)
+                .or_else(|| cur.profiles.first())
+                .cloned()
+        }
+    };
+
+    let update_region_label = {
+        let st = ui_state.clone();
+        let sel = selected_area.clone();
+        let lbl = region_val.clone();
+        Rc::new(move || {
+            let cur = st.borrow();
+            let target = sel.borrow();
+            if let Some(p) = cur.profiles.iter().find(|p| p.area == *target).or_else(|| cur.profiles.first()) {
+                lbl.set_text(&format!("{} · {}", p.continent, p.name));
+            }
+        })
     };
 
     let refresh_hero = {
@@ -690,27 +763,115 @@ fn build_ui(app: &adw::Application) {
         })
     };
 
+    let rebuild_region_dialog: Rc<dyn Fn()> = {
+        let st = ui_state.clone();
+        let sel = selected_area.clone();
+        let c_filter = continent_filter.clone();
+        let list_box = r_list_box.clone();
+        let dlg = region_dialog.clone();
+        let tx = cmd_tx.clone();
+        let upd_lbl = update_region_label.clone();
+        let ref_hero = refresh_hero.clone();
+        Rc::new(move || {
+            while let Some(child) = list_box.first_child() {
+                list_box.remove(&child);
+            }
+            let cur = st.borrow();
+            let cur_sel = sel.borrow().clone();
+            let filter = c_filter.borrow().clone();
+
+            const CONTINENTS: &[&str] = &["东亚·港澳台", "东南亚·南亚", "欧洲·俄区", "美洲·大洋洲", "其他地区"];
+            for &cont in CONTINENTS {
+                if !filter.is_empty() && filter != cont {
+                    continue;
+                }
+                let items: Vec<ProfileItem> = cur
+                    .profiles
+                    .iter()
+                    .filter(|p| p.continent == cont)
+                    .cloned()
+                    .collect();
+                if items.is_empty() {
+                    continue;
+                }
+                let grp = adw::PreferencesGroup::builder().title(cont).build();
+                for prof in items {
+                    let row = adw::ActionRow::builder()
+                        .title(&prof.name)
+                        .subtitle(&format!("{} · {} 个云端入口节点", prof.area.to_uppercase(), prof.node_count))
+                        .activatable(true)
+                        .build();
+                    if prof.area == cur_sel {
+                        let chk = gtk::Image::from_icon_name("object-select-symbolic");
+                        chk.add_css_class("accent");
+                        row.add_suffix(&chk);
+                    }
+                    let sel = sel.clone();
+                    let st = st.clone();
+                    let dlg = dlg.clone();
+                    let tx = tx.clone();
+                    let upd_lbl = upd_lbl.clone();
+                    let ref_hero = ref_hero.clone();
+                    let prof_clone = prof.clone();
+                    row.connect_activated(move |_| {
+                        *sel.borrow_mut() = prof_clone.area.clone();
+                        upd_lbl();
+                        dlg.close();
+                        let cur = st.borrow();
+                        if cur.is_accelerating && cur.active_area != prof_clone.area {
+                            let _ = tx.send(WorkerCmd::StartProfile(prof_clone.clone(), cur.token.clone()));
+                        }
+                        drop(cur);
+                        ref_hero();
+                    });
+                    grp.add(&row);
+                }
+                list_box.append(&grp);
+            }
+        })
+    };
+
+    // Populate segmented filter buttons.
+    {
+        let tabs = [
+            ("全部", ""),
+            ("东亚", "东亚·港澳台"),
+            ("东南亚", "东南亚·南亚"),
+            ("欧俄", "欧洲·俄区"),
+            ("美洲·澳", "美洲·大洋洲"),
+        ];
+        let mut first_btn: Option<gtk::ToggleButton> = None;
+        for (label, cont_val) in tabs {
+            let b = gtk::ToggleButton::with_label(label);
+            if let Some(ref f) = first_btn {
+                b.set_group(Some(f));
+            } else {
+                b.set_active(true);
+                first_btn = Some(b.clone());
+            }
+            let c_filter = continent_filter.clone();
+            let rebuild = rebuild_region_dialog.clone();
+            let cont_str = cont_val.to_string();
+            b.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    *c_filter.borrow_mut() = cont_str.clone();
+                    rebuild();
+                }
+            });
+            filter_bar.append(&b);
+        }
+    }
+
     // UI events.
     {
         let (prefs, win) = (prefs.clone(), win.clone());
         settings_btn.connect_clicked(move |_| prefs.present(Some(&win)));
     }
     {
-        let (tx, st, sup) = (cmd_tx.clone(), ui_state.clone(), suppress.clone());
-        let selected_profile = selected_profile.clone();
-        let refresh = refresh_hero.clone();
-        region_row.connect_selected_notify(move |_| {
-            if sup.get() {
-                return;
-            }
-            let cur = st.borrow();
-            if let Some(p) = selected_profile() {
-                if cur.is_accelerating && cur.active_area != p.area {
-                    let _ = tx.send(WorkerCmd::StartProfile(p, cur.token.clone()));
-                }
-            }
-            drop(cur);
-            refresh();
+        let (dlg, win, rebuild) = (region_dialog.clone(), win.clone(), rebuild_region_dialog.clone());
+        region_row.connect_activated(move |_| {
+            rebuild();
+            dlg.present(Some(&win));
         });
     }
     {
@@ -835,20 +996,13 @@ fn build_ui(app: &adw::Application) {
             total_val.set_text(&format_bytes((snap.rx_bytes + snap.tx_bytes) as f64, 1));
             iface_val.set_text(&format!("{} · {}", snap.traffic_iface, snap.udp_6066));
 
-            // Region list, rebuilt only when profiles change.
+            // Region selection update.
             suppress.set(true);
-            let changed = {
-                let prev = &ui_state.borrow().profiles;
-                prev.len() != snap.profiles.len()
-                    || prev.iter().zip(&snap.profiles).any(|(a, b)| a.area != b.area || a.name != b.name)
-            };
-            if changed {
-                let names: Vec<&str> = snap.profiles.iter().map(|p| p.name.as_str()).collect();
-                region_model.splice(0, region_model.n_items(), &names);
-            }
-            if snap.is_accelerating {
-                if let Some(i) = snap.profiles.iter().position(|p| p.area == snap.active_area) {
-                    region_row.set_selected(i as u32);
+            if snap.is_accelerating && !snap.active_area.is_empty() {
+                *selected_area.borrow_mut() = snap.active_area.clone();
+            } else if !snap.profiles.iter().any(|p| p.area == *selected_area.borrow()) {
+                if let Some(first) = snap.profiles.first() {
+                    *selected_area.borrow_mut() = first.area.clone();
                 }
             }
 
@@ -889,6 +1043,10 @@ fn build_ui(app: &adw::Application) {
             suppress.set(false);
 
             *ui_state.borrow_mut() = snap;
+            update_region_label();
+            if region_dialog.is_mapped() {
+                rebuild_region_dialog();
+            }
             refresh_hero();
         }
         glib::ControlFlow::Continue

@@ -18,8 +18,6 @@ const LEIGOD_DIR: &str = "/opt/leigod";
 const WEBAPI_BASE: &str = "https://webapi.leigod.com";
 const FALLBACK_SIGN: &str = "6aedef9ce4b01aa456e120f2";
 
-const PRESET_AREAS: [&str; 9] = ["hk", "jp", "kr", "tw", "sea", "us", "eu", "ru", "au"];
-
 const BYPASS_DNS_KEYWORDS: [&str; 9] = [
     "google", "gstatic", "youtube", "1e100", "ggpht", "anthropic", "claude", "openai", "github",
 ];
@@ -76,34 +74,61 @@ fn account_file() -> PathBuf {
     state_dir().join("account.json")
 }
 
+pub fn is_internal_geo_key(area: &str) -> bool {
+    matches!(
+        area.trim().to_lowercase().as_str(),
+        "" | "-" | "auto" | "global" | "cn" | "download" | "test" | "sjjc" | "mc"
+    )
+}
+
 pub fn format_region_title(area: &str) -> String {
-    match area.to_lowercase().as_str() {
+    match area.trim().to_lowercase().as_str() {
         "hk" => "中国香港".to_string(),
-        "jp" => "日本东京".to_string(),
-        "kr" => "韩国首尔".to_string(),
-        "tw" => "中国台湾台北".to_string(),
-        "sea" => "东南亚新加坡".to_string(),
-        "us" => "美国洛杉矶".to_string(),
-        "eu" | "de" => "德国法兰克福".to_string(),
-        "ru" => "俄罗斯莫斯科".to_string(),
-        "au" => "澳大利亚悉尼".to_string(),
+        "tw" => "中国台湾".to_string(),
+        "jp" => "日本".to_string(),
+        "kr" => "韩国".to_string(),
+        "asia" => "亚洲通用".to_string(),
+        "sea" => "新加坡".to_string(),
+        "my" => "马来西亚".to_string(),
+        "vn" => "越南".to_string(),
+        "ph" => "菲律宾".to_string(),
+        "idn" => "印度尼西亚".to_string(),
+        "ind" => "印度".to_string(),
+        "pk" => "巴基斯坦".to_string(),
+        "de" => "德国".to_string(),
+        "eu" => "欧洲通用".to_string(),
+        "ru" => "俄罗斯".to_string(),
+        "tr" => "土耳其".to_string(),
+        "ua" => "乌克兰".to_string(),
+        "kaz" => "哈萨克斯坦".to_string(),
+        "us" => "美国".to_string(),
+        "au" => "澳大利亚".to_string(),
+        "br" => "巴西".to_string(),
+        "arg" => "阿根廷".to_string(),
+        "mx" => "墨西哥".to_string(),
         other => other.to_uppercase(),
     }
 }
 
-fn geo_sources(area: &str) -> &'static [&'static str] {
-    match area {
-        "hk" => &["hk"],
-        "jp" => &["jp"],
-        "kr" => &["kr"],
-        "tw" => &["tw"],
-        "sea" => &["sea", "MY", "VN"],
-        "us" => &["us"],
-        "eu" => &["eu", "de"],
-        "ru" => &["ru"],
-        "au" => &["au"],
-        _ => &[],
+pub fn format_region_continent(area: &str) -> &'static str {
+    match area.trim().to_lowercase().as_str() {
+        "hk" | "tw" | "jp" | "kr" | "asia" => "东亚·港澳台",
+        "sea" | "my" | "vn" | "ph" | "idn" | "ind" | "pk" => "东南亚·南亚",
+        "de" | "eu" | "ru" | "tr" | "ua" | "kaz" => "欧洲·俄区",
+        "us" | "au" | "br" | "arg" | "mx" => "美洲·大洋洲",
+        _ => "其他地区",
     }
+}
+
+fn region_sort_rank(area: &str) -> usize {
+    const ORDER: &[&str] = &[
+        "hk", "tw", "jp", "kr", "asia",
+        "sea", "my", "vn", "ph", "idn", "ind", "pk",
+        "de", "eu", "ru", "tr", "ua", "kaz",
+        "us", "au", "br", "arg", "mx",
+    ];
+    let low = area.trim().to_lowercase();
+    ORDER.iter().position(|&k| k == low).unwrap_or(999)
 }
 
 fn now_timestamp_str() -> String {
@@ -756,6 +781,7 @@ fn make_profile(area: &str, conf_str: &str, node_count: usize, catalog: i64, sub
     json!({
         "id": format!("region-{area}"),
         "name": format_region_title(area),
+        "continent": format_region_continent(area),
         "catalog": catalog,
         "subCatalog": sub_catalog,
         "gameId": game_id,
@@ -788,10 +814,14 @@ fn filter_live_nodes_in_conf(mut conf_obj: Value) -> Value {
         }
     }
     if let Some(geo_obj) = srv.get("geo").and_then(|v| v.as_object()) {
-        if let Some(gv) = geo_obj.get(&area).and_then(|v| v.as_array()) {
-            for u in gv.iter().filter_map(|x| x.as_str()) {
-                if !u.is_empty() && u != "direct" {
-                    candidate_uris.insert(u.to_string());
+        for (gk, gv) in geo_obj {
+            if gk.eq_ignore_ascii_case(&area) {
+                if let Some(arr) = gv.as_array() {
+                    for u in arr.iter().filter_map(|x| x.as_str()) {
+                        if !u.is_empty() && u != "direct" {
+                            candidate_uris.insert(u.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -980,7 +1010,7 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
 
     for p in profiles {
         let area = p["area"].as_str().unwrap_or("").trim().to_lowercase();
-        if area.is_empty() || area == "-" || area == "auto" || area == "global" {
+        if is_internal_geo_key(&area) {
             changed = true;
             continue;
         }
@@ -991,13 +1021,15 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
                 if arr.is_empty() {
                     continue;
                 }
-                let entry = merged_geo
-                    .entry(gk.clone())
-                    .or_insert_with(|| Value::Array(Vec::new()));
-                if let Some(cur) = entry.as_array_mut() {
-                    for u in arr {
-                        if !cur.contains(u) {
-                            cur.push(u.clone());
+                for key_variant in [gk.clone(), gk.to_lowercase()] {
+                    let entry = merged_geo
+                        .entry(key_variant)
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if let Some(cur) = entry.as_array_mut() {
+                        for u in arr {
+                            if !cur.contains(u) {
+                                cur.push(u.clone());
+                            }
                         }
                     }
                 }
@@ -1043,6 +1075,7 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
             );
             if p["id"] != new_entry["id"]
                 || p["name"] != new_entry["name"]
+                || p["continent"] != new_entry["continent"]
                 || was_mod
                 || p["nodeCount"].as_u64() != Some(node_count as u64)
                 || by_area.contains_key(&area)
@@ -1075,18 +1108,32 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
             let now_ts = base_entry["updatedAt"].as_str().unwrap_or("").to_string();
             let merged_geo_val = Value::Object(merged_geo.clone());
 
-            for &target_area in &["hk", "jp", "kr", "tw", "sea", "us", "eu", "ru", "au"] {
+            let mut dynamic_areas = BTreeSet::new();
+            for k in by_area.keys() {
+                if !is_internal_geo_key(k) {
+                    dynamic_areas.insert(k.to_lowercase());
+                }
+            }
+            for gk in merged_geo.keys() {
+                if !is_internal_geo_key(gk) {
+                    dynamic_areas.insert(gk.to_lowercase());
+                }
+            }
+
+            for target_area in &dynamic_areas {
                 let mut valid_geo_uris = BTreeSet::new();
-                for &gk in geo_sources(target_area) {
-                    if let Some(arr) = merged_geo.get(gk).and_then(|v| v.as_array()) {
-                        for u in arr.iter().filter_map(|x| x.as_str()) {
-                            if u != "direct" {
-                                valid_geo_uris.insert(u.to_string());
+                for (gk, gv) in &merged_geo {
+                    if gk.eq_ignore_ascii_case(target_area) {
+                        if let Some(arr) = gv.as_array() {
+                            for u in arr.iter().filter_map(|x| x.as_str()) {
+                                if !u.is_empty() && u != "direct" {
+                                    valid_geo_uris.insert(u.to_string());
+                                }
                             }
                         }
                     }
                 }
-                let area_nodes = nodes_by_area.entry(target_area.to_string()).or_default();
+                let area_nodes = nodes_by_area.entry(target_area.clone()).or_default();
                 if !valid_geo_uris.is_empty() {
                     area_nodes.retain(|u, _| valid_geo_uris.contains(u));
                     for u in &valid_geo_uris {
@@ -1112,9 +1159,9 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
                     syn_conf["server"]["allNode"] = Value::Array(merged_node_list.clone());
                     syn_conf["server"]["geo"] = merged_geo_val.clone();
                     let (syn_str, syn_parsed, _) = sanitize_acc_conf(&syn_conf);
-                    parsed_by_area.insert(target_area.to_string(), syn_parsed);
+                    parsed_by_area.insert(target_area.clone(), syn_parsed);
                     by_area.insert(
-                        target_area.to_string(),
+                        target_area.clone(),
                         make_profile(
                             target_area,
                             &syn_str,
@@ -1145,15 +1192,9 @@ fn consolidate_regional_profiles(profiles: Vec<Value>) -> (Vec<Value>, bool) {
         }
     }
 
-    let mut ordered = Vec::new();
-    for k in PRESET_AREAS {
-        if let Some(v) = by_area.remove(k) {
-            ordered.push(v);
-        }
-    }
-    for (_, v) in by_area {
-        ordered.push(v);
-    }
+    let mut items: Vec<(String, Value)> = by_area.into_iter().collect();
+    items.sort_by(|(a, _), (b, _)| region_sort_rank(a).cmp(&region_sort_rank(b)).then_with(|| a.cmp(b)));
+    let ordered: Vec<Value> = items.into_iter().map(|(_, v)| v).collect();
     (ordered, changed)
 }
 

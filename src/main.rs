@@ -14,7 +14,6 @@ use std::time::Duration;
 
 pub const CONF_FILE: &str = "/etc/default/leigod-webui";
 pub const SERVICES: [&str; 2] = ["leigod_plugin.service", "leigod_webui.service"];
-pub const VALID_AREAS: [&str; 9] = ["hk", "jp", "kr", "tw", "sea", "us", "eu", "ru", "au"];
 
 pub fn load_host_port() -> (String, u16) {
     let mut host = env::var("LEIGOD_WEBUI_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -102,15 +101,48 @@ Leinux — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
 选项:
   (无参数)             自动拉起后台服务并打开原生 GTK4 控制面板窗口
   --start [AREA]       免开界面直接恢复时长并启动加速 (默认: hk)
-                       可选区服: {}
+  --list               按大洲分类列出云端动态同步的全部可用区服及节点数
   --pause              仅断开加速隧道并暂停官网账号时长 (保持后台服务运行)
   --stop               暂停官网账号时长并停止后台服务
   --status             查看服务运行状态、当前加速区服与账号剩余时长
   --port <PORT>        修改本地守护服务端口 (写入 {CONF_FILE}) 并重启服务
   --daemon             以守护进程模式运行后台 RPC 与路由服务
-  -h, --help           显示此帮助信息",
-        VALID_AREAS.join(", ")
+  -h, --help           显示此帮助信息"
     );
+}
+
+fn cmd_list() -> i32 {
+    ensure_services();
+    let st = match http_request("GET", "/api/host-status", None, 5000) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("错误: 无法连接后台服务: {e}");
+            return 1;
+        }
+    };
+    let profiles = st["profiles"].as_array().cloned().unwrap_or_default();
+    for cont in ["东亚·港澳台", "东南亚·南亚", "欧洲·俄区", "美洲·大洋洲", "其他地区"] {
+        let items: Vec<&Value> = profiles
+            .iter()
+            .filter(|p| {
+                p["continent"]
+                    .as_str()
+                    .unwrap_or_else(|| daemon::format_region_continent(p["area"].as_str().unwrap_or("")))
+                    == cont
+            })
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        println!("[{cont}]");
+        for p in items {
+            let area = p["area"].as_str().unwrap_or("");
+            let name = p["name"].as_str().unwrap_or("");
+            let nc = p["nodeCount"].as_u64().unwrap_or(0);
+            println!("  {area:<6} {name} ({nc} 节点)");
+        }
+    }
+    0
 }
 
 fn cmd_start(area: &str) -> i32 {
@@ -129,7 +161,8 @@ fn cmd_start(area: &str) -> i32 {
         .iter()
         .find(|p| p["area"].as_str().unwrap_or("").eq_ignore_ascii_case(&area))
     else {
-        eprintln!("错误: 未知区服 '{area}'，可选区服: {}", VALID_AREAS.join(", "));
+        let avail: Vec<&str> = profiles.iter().filter_map(|p| p["area"].as_str()).collect();
+        eprintln!("错误: 未知区服 '{area}'，当前云端可用区服: {}", avail.join(", "));
         return 1;
     };
 
@@ -354,6 +387,9 @@ fn main() {
         Some("--start") => {
             let area = args.get(1).map(|s| s.as_str()).unwrap_or("hk");
             process::exit(cmd_start(area));
+        }
+        Some("--list" | "--regions") => {
+            process::exit(cmd_list());
         }
         Some("--pause") => {
             process::exit(cmd_pause());
