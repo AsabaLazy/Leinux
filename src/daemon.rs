@@ -43,6 +43,7 @@ const BLOCKED_ROUTER_CMDS: [&str; 15] = [
 ];
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static STOP_ENFORCED: AtomicBool = AtomicBool::new(false);
 
 struct ScanCache {
     gw_ts: Option<Instant>,
@@ -669,10 +670,38 @@ pub fn remove_mangle_guard() {
     let _ = run_ipt(&["-t", "mangle", "-X", "LEIGOD_GUARD"]);
 }
 
+fn has_active_tun() -> bool {
+    if Path::new("/sys/class/net/tun_PC").exists() {
+        return true;
+    }
+    if let Ok(entries) = fs::read_dir("/sys/class/net") {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with("tun_") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn run_cleanup_net() {
+    let _ = Command::new("/bin/sh")
+        .arg(Path::new(LEIGOD_DIR).join("leigod_cleanup_net.sh"))
+        .status();
+}
+
 fn check_firewall_residuals() -> bool {
     if let Ok(out) = Command::new("iptables").args(["-t", "mangle", "-S", "OUTPUT"]).output() {
         let s = String::from_utf8_lossy(&out.stdout);
-        if s.contains("0x10") || s.contains("GAMEACC") {
+        let has_rules = s.contains("0x10") || s.contains("GAMEACC");
+        if STOP_ENFORCED.load(Ordering::SeqCst) {
+            if has_rules || has_active_tun() {
+                run_cleanup_net();
+                flush_dns_cache();
+            }
+            return false;
+        }
+        if has_rules {
             if !s.contains("-A OUTPUT -j LEIGOD_GUARD") {
                 install_mangle_guard();
             }
@@ -686,6 +715,7 @@ fn check_firewall_residuals() -> bool {
 }
 
 fn pause_account_time(account_token: &str, router_token: &str) -> Value {
+    STOP_ENFORCED.store(true, Ordering::SeqCst);
     if !router_token.is_empty() {
         install_mangle_guard();
         let _ = ws_rpc_call(
@@ -704,6 +734,7 @@ fn pause_account_time(account_token: &str, router_token: &str) -> Value {
             3000,
         );
     }
+    run_cleanup_net();
     remove_mangle_guard();
     flush_dns_cache();
     let cfg = load_account_config();
@@ -1770,6 +1801,7 @@ fn handle_client(stream: TcpStream) {
                 }
 
                 if matches!(cmd_upper.as_str(), "STARTACC" | "START") {
+                    STOP_ENFORCED.store(false, Ordering::SeqCst);
                     let cfg = load_account_config();
                     let p_tok = resolve_p_token(&cfg);
                     if !p_tok.is_empty() {
@@ -1815,9 +1847,19 @@ fn handle_client(stream: TcpStream) {
                 match ws_rpc_call("127.0.0.1", 5588, "/ws", &req_obj, 5000) {
                     Ok(resp) => {
                         if matches!(cmd_upper.as_str(), "STARTACC" | "START") {
+                            if resp["code"].as_i64() == Some(0) {
+                                for _ in 0..25 {
+                                    if has_active_tun() {
+                                        break;
+                                    }
+                                    thread::sleep(Duration::from_millis(100));
+                                }
+                            }
                             install_mangle_guard();
                             flush_dns_cache();
                         } else if matches!(cmd_upper.as_str(), "STOPACC" | "STOP") {
+                            STOP_ENFORCED.store(true, Ordering::SeqCst);
+                            run_cleanup_net();
                             remove_mangle_guard();
                             flush_dns_cache();
                         }
