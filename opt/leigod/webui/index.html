@@ -1006,8 +1006,14 @@
         return;
       }
 
-      sel.innerHTML = savedProfiles
-        .map((p, idx) => `<option value="${idx}">${escapeHtml(p.name || p.id)}</option>`)
+      const groups = {};
+      savedProfiles.forEach((p, idx) => {
+        const g = p.continent || '其他地区';
+        if (!groups[g]) groups[g] = [];
+        groups[g].push({ p, idx });
+      });
+      sel.innerHTML = Object.entries(groups)
+        .map(([g, items]) => `<optgroup label="${escapeHtml(g)}">${items.map(({ p, idx }) => `<option value="${idx}">${escapeHtml(p.name || p.id)}</option>`).join('')}</optgroup>`)
         .join('');
 
       let targetIdx = 0;
@@ -1059,17 +1065,12 @@
       if (!p) return;
       activeAreaCode = String(p.area || 'HK').toUpperCase();
       showToast(`正在恢复时长并启动 ${p.name}...`);
-      try { await apiPost('/api/account/recover'); } catch (_) {}
-      let parsedConf = p.conf;
-      if (typeof parsedConf === 'string') {
-        try { parsedConf = JSON.parse(parsedConf); } catch (_) {}
+      const res = await apiPost('/api/acc/start', { area: p.area, recover: true });
+      if (res && res.ok) {
+        showToast(`已启动 ${p.name} 加速`);
+      } else {
+        showToast((res && res.msg) || '启动加速失败');
       }
-      await sendCmd('STARTACC', {
-        token: getToken(),
-        catalog: Number(p.catalog || 2),
-        subCatalog: Number(p.subCatalog || 0),
-        conf: parsedConf,
-      });
       await loadAccountStatus();
       await refreshAll();
     }

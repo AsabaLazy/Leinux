@@ -1,5 +1,9 @@
 mod daemon;
 mod gui;
+mod net;
+mod profiles;
+mod rpc;
+mod types;
 
 use serde_json::{json, Value};
 use std::env;
@@ -11,6 +15,7 @@ use std::path::Path;
 use std::process::{self, Command, Stdio};
 use std::thread;
 use std::time::Duration;
+use types::{DaemonSnapshot, CONTINENT_ORDER};
 
 pub const CONF_FILE: &str = "/etc/default/leigod-webui";
 pub const SERVICES: [&str; 2] = ["leigod_plugin.service", "leigod_webui.service"];
@@ -23,21 +28,21 @@ pub fn load_host_port() -> (String, u16) {
         .unwrap_or(8088);
 
     if let Ok(content) = fs::read_to_string(CONF_FILE) {
-        for raw in content.lines() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                let k = k.trim();
-                let v = v.trim().trim_matches(|c| c == '\'' || c == '"');
-                if k == "LEIGOD_WEBUI_HOST" && !v.is_empty() {
-                    host = v.to_string();
-                } else if k == "LEIGOD_WEBUI_PORT" {
-                    if let Ok(p) = v.parse::<u16>() {
+        for (k, v) in content
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter_map(|l| l.split_once('='))
+        {
+            let val = v.trim().trim_matches(|c| c == '\'' || c == '"');
+            match k.trim() {
+                "LEIGOD_WEBUI_HOST" if !val.is_empty() => host = val.to_string(),
+                "LEIGOD_WEBUI_PORT" => {
+                    if let Ok(p) = val.parse::<u16>() {
                         port = p;
                     }
                 }
+                _ => {}
             }
         }
     }
@@ -54,7 +59,7 @@ pub fn http_request(method: &str, path: &str, body: Option<&Value>, timeout_ms: 
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
 
-    let payload = body.map(|b| b.to_string()).unwrap_or_default();
+    let payload = body.map(Value::to_string).unwrap_or_default();
     let req = if method == "POST" {
         format!(
             "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
@@ -85,7 +90,7 @@ pub fn ensure_services() {
         let _ = Command::new("systemctl").arg("start").args(SERVICES).status();
     }
     for _ in 0..25 {
-        if http_request("GET", "/api/host-status", None, 300).is_ok() {
+        if http_request("GET", "/api/status?known_rev=1", None, 300).is_ok() {
             return;
         }
         thread::sleep(Duration::from_millis(100));
@@ -111,35 +116,30 @@ Leinux — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
     );
 }
 
+fn fetch_status(include_account: bool) -> Result<DaemonSnapshot, String> {
+    let url = if include_account { "/api/status?include_account=1" } else { "/api/status" };
+    let val = http_request("GET", url, None, 6000)?;
+    serde_json::from_value(val).map_err(|e| e.to_string())
+}
+
 fn cmd_list() -> i32 {
     ensure_services();
-    let st = match http_request("GET", "/api/host-status", None, 5000) {
-        Ok(v) => v,
+    let snap = match fetch_status(false) {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("错误: 无法连接后台服务: {e}");
             return 1;
         }
     };
-    let profiles = st["profiles"].as_array().cloned().unwrap_or_default();
-    for cont in ["东亚·港澳台", "东南亚·南亚", "欧洲·俄区", "美洲·大洋洲", "其他地区"] {
-        let items: Vec<&Value> = profiles
-            .iter()
-            .filter(|p| {
-                p["continent"]
-                    .as_str()
-                    .unwrap_or_else(|| daemon::format_region_continent(p["area"].as_str().unwrap_or("")))
-                    == cont
-            })
-            .collect();
+    let profiles = snap.profiles.unwrap_or_default();
+    for cont in CONTINENT_ORDER {
+        let items: Vec<_> = profiles.iter().filter(|p| p.continent == cont).collect();
         if items.is_empty() {
             continue;
         }
         println!("[{cont}]");
         for p in items {
-            let area = p["area"].as_str().unwrap_or("");
-            let name = p["name"].as_str().unwrap_or("");
-            let nc = p["nodeCount"].as_u64().unwrap_or(0);
-            println!("  {area:<6} {name} ({nc} 节点)");
+            println!("  {:<6} {} ({} 节点)", p.area, p.name, p.node_count);
         }
     }
     0
@@ -148,55 +148,14 @@ fn cmd_list() -> i32 {
 fn cmd_start(area: &str) -> i32 {
     let area = area.trim().to_lowercase();
     ensure_services();
-    let st = match http_request("GET", "/api/host-status", None, 5000) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("错误: 无法连接后台服务: {e}");
-            return 1;
-        }
-    };
-
-    let profiles = st["profiles"].as_array().cloned().unwrap_or_default();
-    let Some(prof) = profiles
-        .iter()
-        .find(|p| p["area"].as_str().unwrap_or("").eq_ignore_ascii_case(&area))
-    else {
-        let avail: Vec<&str> = profiles.iter().filter_map(|p| p["area"].as_str()).collect();
-        eprintln!("错误: 未知区服 '{area}'，当前云端可用区服: {}", avail.join(", "));
-        return 1;
-    };
-
-    let _ = http_request("POST", "/api/account/recover", Some(&json!({})), 6000);
-    let conf_val: Value = match &prof["conf"] {
-        Value::String(s) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
-        other => other.clone(),
-    };
-
-    let req = json!({
-        "cmd": "STARTACC",
-        "tag": "cli-start",
-        "sn": "",
-        "cli": "webui",
-        "code": 0,
-        "err": "",
-        "data": {
-            "token": st["token"].as_str().unwrap_or(""),
-            "catalog": prof["catalog"].as_i64().unwrap_or(2),
-            "subCatalog": prof["subCatalog"].as_i64().unwrap_or(0),
-            "conf": conf_val,
-        }
-    });
-
-    match http_request("POST", "/api/ws-rpc", Some(&req), 8000) {
-        Ok(res) if res["code"].as_i64() == Some(0) => {
-            println!(
-                "已恢复时长并启动加速: {} ({area})",
-                prof["name"].as_str().unwrap_or(&area)
-            );
+    match http_request("POST", "/api/acc/start", Some(&json!({"area": area, "recover": true})), 10000) {
+        Ok(res) if res["ok"].as_bool() == Some(true) => {
+            let name = res["name"].as_str().unwrap_or(&area);
+            println!("已恢复时长并启动加速: {name} ({area})");
             0
         }
         Ok(res) => {
-            eprintln!("启动加速失败: {res}");
+            eprintln!("错误: {}", res["msg"].as_str().unwrap_or("启动加速失败"));
             1
         }
         Err(e) => {
@@ -247,97 +206,31 @@ fn cmd_status() -> i32 {
     }
 
     let (host, port) = load_host_port();
-    let Ok(st) = http_request("GET", "/api/host-status", None, 5000) else {
+    let Ok(snap) = fetch_status(true) else {
         println!("服务状态: 异常 (无法连接 http://{host}:{port})");
         return 1;
     };
 
-    let token = st["token"].as_str().unwrap_or("");
-    let mut acc_str = "待加速".to_string();
-    let mut delay_str = "- ms".to_string();
+    let profiles = snap.profiles.unwrap_or_default();
+    let (acc_str, delay_str) = if snap.is_accelerating {
+        let name = profiles
+            .iter()
+            .find(|p| p.area == snap.active_area)
+            .map(|p| p.name.as_str())
+            .unwrap_or(&snap.active_area);
+        let delay = if snap.net_delay > 0 { format!("{} ms", snap.net_delay) } else { "- ms".to_string() };
+        (format!("{name} · 加速中 ({})", snap.tun_interface), delay)
+    } else {
+        ("待加速".to_string(), "- ms".to_string())
+    };
 
-    if !token.is_empty() {
-        if let Ok(dev_resp) = http_request(
-            "POST",
-            "/api/ws-rpc",
-            Some(&json!({"cmd": "GETDEVICELIST", "tag": "1", "sn": "", "cli": "webui", "code": 0, "err": "", "data": {"token": token}})),
-            4000,
-        ) {
-            let mut d = dev_resp["data"].clone();
-            if let Some(s) = d.as_str() {
-                if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-                    d = parsed;
-                }
-            }
-            let list = d
-                .as_array()
-                .cloned()
-                .or_else(|| d["listGameDevices"]["list"].as_array().cloned())
-                .or_else(|| d["list"].as_array().cloned())
-                .unwrap_or_default();
-
-            if let Some(active) = list.iter().find(|x| {
-                x["accState"].as_i64() == Some(1)
-                    || x["accState"].as_str() == Some("1")
-                    || x["accState"].as_str() == Some("started")
-                    || x["state"].as_i64() == Some(1)
-            }) {
-                let area = active["area"].as_str().unwrap_or("hk").to_lowercase();
-                let name = st["profiles"]
-                    .as_array()
-                    .and_then(|arr| {
-                        arr.iter()
-                            .find(|p| p["area"].as_str().unwrap_or("").eq_ignore_ascii_case(&area))
-                    })
-                    .and_then(|p| p["name"].as_str())
-                    .unwrap_or(&area);
-                let tun = st["tun_interface"].as_str().unwrap_or("tun_PC");
-                acc_str = format!("{name} · 加速中 ({tun})");
-
-                if let Ok(ainfo_resp) = http_request(
-                    "POST",
-                    "/api/ws-rpc",
-                    Some(&json!({"cmd": "GETACCINFO", "tag": "2", "sn": "", "cli": "webui", "code": 0, "err": "", "data": {"token": token}})),
-                    4000,
-                ) {
-                    let mut ainfo = ainfo_resp["data"].clone();
-                    if let Some(s) = ainfo.as_str() {
-                        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-                            ainfo = parsed;
-                        }
-                    }
-                    let nd = ainfo["accInfo"]["netDelay"]
-                        .as_str()
-                        .or_else(|| ainfo["netDelay"].as_str())
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .or_else(|| ainfo["accInfo"]["netDelay"].as_i64())
-                        .or_else(|| ainfo["netDelay"].as_i64())
-                        .unwrap_or(0);
-                    if nd > 0 {
-                        delay_str = format!("{nd} ms");
-                    }
-                }
-            }
+    let acct_line = match snap.account {
+        Some(acct) if acct.configured => {
+            let state_lbl = if acct.paused { "已暂停" } else { "计时中" };
+            format!("{state_lbl} (剩余 {} 小时 {} 分)", acct.hours, acct.mins)
         }
-    }
-
-    let mut acct_line = "未配置官网 Token".to_string();
-    if let Ok(acct) = http_request("GET", "/api/account/status", None, 5000) {
-        if acct["configured"].as_bool() == Some(true) {
-            let info = &acct["response"]["data"];
-            if info.is_object() {
-                let paused = info["pause_status_id"].as_i64().unwrap_or(1) == 1
-                    || info["pause_status_id"].as_str() == Some("1");
-                let sec = info["expiry_time_samp"]
-                    .as_i64()
-                    .or_else(|| info["expiry_time_samp"].as_str().and_then(|s| s.parse().ok()))
-                    .or_else(|| info["user_pause_time"].as_i64())
-                    .unwrap_or(0);
-                let state_lbl = if paused { "已暂停" } else { "计时中" };
-                acct_line = format!("{state_lbl} (剩余 {} 小时 {} 分)", sec / 3600, (sec % 3600) / 60);
-            }
-        }
-    }
+        _ => "未配置官网 Token".to_string(),
+    };
 
     println!("服务状态: 运行中 (http://{host}:{port})");
     println!("加速状态: {acc_str} | 节点延迟: {delay_str}");
@@ -346,14 +239,10 @@ fn cmd_status() -> i32 {
 }
 
 fn cmd_port(port_str: &str) -> i32 {
-    let Ok(port) = port_str.parse::<u16>() else {
+    let Some(port) = port_str.parse::<u16>().ok().filter(|&p| p > 0) else {
         eprintln!("错误: 请提供合法的端口号 (1-65535)，例如: lgd --port 8090");
         return 1;
     };
-    if port == 0 {
-        eprintln!("错误: 端口号必须在 1-65535 之间");
-        return 1;
-    }
     if unsafe { libc::geteuid() } != 0 {
         let exe = env::current_exe().unwrap_or_else(|_| Path::new("/usr/bin/lgd").to_path_buf());
         let err = Command::new("sudo").arg(exe).args(["--port", port_str]).exec();
@@ -377,29 +266,14 @@ fn cmd_port(port_str: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    match args.first().map(|s| s.as_str()) {
-        Some("-h" | "--help") => {
-            print_help();
-        }
-        Some("--daemon") => {
-            daemon::run_daemon();
-        }
-        Some("--start") => {
-            let area = args.get(1).map(|s| s.as_str()).unwrap_or("hk");
-            process::exit(cmd_start(area));
-        }
-        Some("--list" | "--regions") => {
-            process::exit(cmd_list());
-        }
-        Some("--pause") => {
-            process::exit(cmd_pause());
-        }
-        Some("--stop") => {
-            process::exit(cmd_stop());
-        }
-        Some("--status") => {
-            process::exit(cmd_status());
-        }
+    match args.first().map(String::as_str) {
+        Some("-h" | "--help") => print_help(),
+        Some("--daemon") => daemon::run_daemon(),
+        Some("--start") => process::exit(cmd_start(args.get(1).map(String::as_str).unwrap_or("hk"))),
+        Some("--list" | "--regions") => process::exit(cmd_list()),
+        Some("--pause") => process::exit(cmd_pause()),
+        Some("--stop") => process::exit(cmd_stop()),
+        Some("--status") => process::exit(cmd_status()),
         Some("--port") => {
             let Some(p) = args.get(1) else {
                 eprintln!("错误: --port 需要指定端口号");
@@ -407,9 +281,7 @@ fn main() {
             };
             process::exit(cmd_port(p));
         }
-        Some(other) if other.starts_with("--host") => {
-            daemon::run_daemon();
-        }
+        Some(other) if other.starts_with("--host") => daemon::run_daemon(),
         Some(other) => {
             eprintln!("未知选项: {other}\n");
             print_help();
