@@ -340,7 +340,8 @@ pub fn ensure_router_bound(p_token: &str, user_id: &str, force: bool) -> bool {
         return false;
     }
     let (_, cur_rtoken, cur_uid) = read_ini_values();
-    if !force && !cur_rtoken.is_empty() && !cur_rtoken.starts_with('<') {
+    let same_user = user_id.trim().is_empty() || cur_uid == user_id.trim();
+    if !force && same_user && !cur_rtoken.is_empty() && !cur_rtoken.starts_with('<') {
         return true;
     }
     let uid = if !user_id.trim().is_empty() {

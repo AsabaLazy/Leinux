@@ -1,5 +1,6 @@
 mod daemon;
 mod gui;
+mod login;
 mod net;
 mod profiles;
 mod rpc;
@@ -105,6 +106,7 @@ Leinux — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
 
 选项:
   (无参数)             自动拉起后台服务并打开原生 GTK4 控制面板窗口
+  --login              弹出官方登录小窗口，登录成功后自动完成设备绑定与凭证保存
   --start [AREA]       免开界面恢复时长并启动加速 (不传参数则使用上次选择的区服)
   --list               按七大洲分类列出云端动态同步的全部可用区服及节点数
   --pause              仅断开加速隧道并暂停官网账号时长 (保持后台服务运行)
@@ -120,6 +122,32 @@ fn fetch_status(include_account: bool) -> Result<DaemonSnapshot, String> {
     let url = if include_account { "/api/status?include_account=1" } else { "/api/status" };
     let val = http_request("GET", url, None, 6000)?;
     serde_json::from_value(val).map_err(|e| e.to_string())
+}
+
+fn cmd_login() -> i32 {
+    ensure_services();
+    println!("正在打开雷神登录小窗口，请在窗口中完成手机号或密码登录...");
+    let ptok = match login::run_browser_login_popup() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("登录未完成: {e}");
+            return 1;
+        }
+    };
+    match http_request("POST", "/api/account/save-token", Some(&json!({"account_token": ptok})), 12000) {
+        Ok(res) if res["ok"].as_bool() == Some(true) => {
+            println!("登录成功！已自动完成本机硬件绑定与官网凭证同步。");
+            cmd_status()
+        }
+        Ok(res) => {
+            eprintln!("保存凭证失败: {res}");
+            1
+        }
+        Err(e) => {
+            eprintln!("保存凭证失败: {e}");
+            1
+        }
+    }
 }
 
 fn cmd_list() -> i32 {
@@ -270,6 +298,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => print_help(),
         Some("--daemon") => daemon::run_daemon(),
+        Some("--login") => process::exit(cmd_login()),
         Some("--start") => process::exit(cmd_start(args.get(1).map(String::as_str).unwrap_or(""))),
         Some("--list" | "--regions") => process::exit(cmd_list()),
         Some("--pause") => process::exit(cmd_pause()),

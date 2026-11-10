@@ -1,4 +1,5 @@
 use crate::http_request;
+use crate::login::{find_chromium_binary, run_browser_login_popup};
 use crate::types::{AccountSnapshot, DaemonSnapshot, ProfileSummary, CONTINENT_ORDER};
 use adw::prelude::*;
 use gtk4 as gtk;
@@ -11,7 +12,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const APP_ID: &str = "io.github.asabalazy.leinux";
-const TOKEN_SNIPPET: &str = r#"copy(JSON.parse(localStorage.getItem("account_token")).account_token)"#;
 const SPARK_POINTS: usize = 30;
 
 enum WorkerEvent {
@@ -79,8 +79,8 @@ struct MainWidgets {
 #[derive(Clone)]
 struct PrefsWidgets {
     dialog: adw::PreferencesDialog,
+    login_btn: gtk::Button,
     token_row: adw::PasswordEntryRow,
-    copy_btn: gtk::Button,
     auto_pause_row: adw::SwitchRow,
     dns_row: gtk::Editable,
     dns_entry: adw::EntryRow,
@@ -212,9 +212,9 @@ fn handle_worker_cmd(cmd: WorkerCmd, evt_tx: &mpsc::Sender<WorkerEvent>, known_r
                 "POST",
                 "/api/account/save-token",
                 Some(&json!({"account_token": tok, "auto_pause_on_stop": auto_pause})),
-                8000,
+                12000,
             );
-            toast("已保存 Token 并更新账号状态".to_string());
+            toast("已保存凭证并同步本机绑定与账号状态".to_string());
             refresh_account = true;
         }
         WorkerCmd::SaveAutoPause(auto_pause) => {
@@ -407,19 +407,23 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
 }
 
 fn build_prefs_dialog() -> PrefsWidgets {
+    let (login_row, login_btn) = button_row(
+        "网页一键登录",
+        "弹出官方小窗口登录，自动提取凭证、绑定本机并永久自动续期",
+        "打开登录窗",
+    );
+    login_btn.add_css_class("suggested-action");
     let token_row = adw::PasswordEntryRow::builder()
-        .title("官网 account_token 或 pToken")
+        .title("手动填入 Token（备用）")
         .show_apply_button(true)
         .build();
-    let (snippet_row, copy_btn) =
-        button_row("获取 Token", "官网登录后按 F12，在控制台粘贴提取命令", "复制命令");
     let auto_pause_row = adw::SwitchRow::builder()
         .title("停止加速时暂停时长")
         .subtitle("关机或停止服务时同样生效")
         .build();
     let acct_prefs = adw::PreferencesGroup::builder().title("雷神账号").build();
+    acct_prefs.add(&login_row);
     acct_prefs.add(&token_row);
-    acct_prefs.add(&snippet_row);
     acct_prefs.add(&auto_pause_row);
 
     let dns_entry = adw::EntryRow::builder().title("直连 DNS").show_apply_button(true).build();
@@ -447,8 +451,8 @@ fn build_prefs_dialog() -> PrefsWidgets {
 
     PrefsWidgets {
         dialog,
+        login_btn,
         token_row,
-        copy_btn,
         auto_pause_row,
         dns_row: dns_entry.clone().upcast(),
         dns_entry,
@@ -720,9 +724,9 @@ impl MainWidgets {
             ));
             self.acct_btn.set_label(if st.account.paused { "恢复时长" } else { "暂停时长" });
         } else {
-            self.acct_row.set_title("未配置 Token");
-            self.acct_row.set_subtitle("配置后可自动恢复与暂停时长");
-            self.acct_btn.set_label("配置");
+            self.acct_row.set_title("未登录雷神账号");
+            self.acct_row.set_subtitle("点击右侧一键弹出登录小窗口，自动完成绑定与同步");
+            self.acct_btn.set_label("登录账号");
         }
 
         pw.auto_pause_row.set_active(st.account.auto_pause_on_stop);
@@ -761,7 +765,7 @@ fn build_ui(app: &adw::Application) {
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCmd>();
     let (evt_tx, evt_rx) = mpsc::channel::<WorkerEvent>();
-    spawn_worker(cmd_rx, evt_tx);
+    spawn_worker(cmd_rx, evt_tx.clone());
 
     let (region_dialog, rebuild_region_dialog) =
         build_region_dialog(state.clone(), mw.clone(), cmd_tx.clone());
@@ -813,13 +817,49 @@ fn build_ui(app: &adw::Application) {
             }
         });
     }
+    let start_popup_login = {
+        let tx = cmd_tx.clone();
+        let evt_tx = evt_tx.clone();
+        let sw = pw.auto_pause_row.clone();
+        let prefs = pw.dialog.clone();
+        let win = mw.win.clone();
+        Rc::new(move |open_prefs_on_missing_browser: bool| {
+            if find_chromium_binary().is_none() {
+                let _ = evt_tx.send(WorkerEvent::Toast(
+                    "未检测到 Chrome / Chromium / Edge 浏览器，请手动填入 Token".to_string(),
+                ));
+                if open_prefs_on_missing_browser {
+                    prefs.present(Some(&win));
+                }
+                return;
+            }
+            let auto_pause = sw.is_active();
+            let tx = tx.clone();
+            let evt_tx = evt_tx.clone();
+            let _ = evt_tx.send(WorkerEvent::Toast("正在打开雷神登录小窗口，登录成功后将自动关闭...".to_string()));
+            thread::spawn(move || match run_browser_login_popup() {
+                Ok(ptok) => {
+                    let _ = evt_tx.send(WorkerEvent::Toast("已自动获取凭证，正在绑定设备并同步账号...".to_string()));
+                    let _ = tx.send(WorkerCmd::SaveToken(ptok, auto_pause));
+                }
+                Err(msg) => {
+                    let _ = evt_tx.send(WorkerEvent::Toast(msg));
+                }
+            });
+        })
+    };
+
     {
-        let (tx, st, prefs, win) = (cmd_tx.clone(), state.clone(), pw.dialog.clone(), mw.win.clone());
+        let (tx, st) = (cmd_tx.clone(), state.clone());
+        let login = start_popup_login.clone();
         mw.acct_btn.connect_clicked(move |_| {
-            let cur = st.borrow();
-            if !cur.account.configured {
-                prefs.present(Some(&win));
-            } else if cur.account.paused {
+            let (configured, paused) = {
+                let cur = st.borrow();
+                (cur.account.configured, cur.account.paused)
+            };
+            if !configured {
+                login(true);
+            } else if paused {
                 let _ = tx.send(WorkerCmd::RecoverAccount);
             } else {
                 let _ = tx.send(WorkerCmd::PauseAccount);
@@ -827,11 +867,8 @@ fn build_ui(app: &adw::Application) {
         });
     }
     {
-        let toast = toast.clone();
-        pw.copy_btn.connect_clicked(move |btn| {
-            btn.clipboard().set_text(TOKEN_SNIPPET);
-            toast("已复制提取命令");
-        });
+        let login = start_popup_login.clone();
+        pw.login_btn.connect_clicked(move |_| login(false));
     }
     {
         let (tx, sw) = (cmd_tx.clone(), pw.auto_pause_row.clone());
