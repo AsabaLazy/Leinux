@@ -7,11 +7,14 @@ pub const FALLBACK_SIGN: &str = "6aedef9ce4b01aa456e120f2";
 pub const APP_ID: &str = "nnMobile_d0k3duup";
 pub const BUSI_TYPE: &str = "nn_aksjfdasoifnkls";
 
-pub const CONTINENT_ORDER: [&str; 5] = [
-    "东亚·港澳台",
-    "东南亚·南亚",
-    "欧洲·俄区",
-    "美洲·大洋洲",
+pub const CONTINENT_ORDER: [&str; 8] = [
+    "亚洲",
+    "欧洲",
+    "北美洲",
+    "南美洲",
+    "大洋洲",
+    "非洲",
+    "南极洲",
     "其他地区",
 ];
 
@@ -162,20 +165,26 @@ pub fn format_region_title(area: &str) -> String {
 
 pub fn format_region_continent(area: &str) -> &'static str {
     match area.trim().to_lowercase().as_str() {
-        "hk" | "tw" | "jp" | "kr" | "asia" => "东亚·港澳台",
-        "sea" | "my" | "vn" | "ph" | "idn" | "ind" | "pk" => "东南亚·南亚",
-        "de" | "eu" | "ru" | "tr" | "ua" | "kaz" => "欧洲·俄区",
-        "us" | "au" | "br" | "arg" | "mx" => "美洲·大洋洲",
+        "hk" | "tw" | "jp" | "kr" | "asia" | "sea" | "sg" | "my" | "vn" | "ph" | "idn"
+        | "ind" | "pk" | "kaz" | "tr" | "th" | "ae" | "sa" | "il" => "亚洲",
+        "de" | "eu" | "ru" | "ua" | "uk" | "gb" | "fr" | "nl" | "it" | "es" | "pl" | "se"
+        | "ch" => "欧洲",
+        "us" | "mx" | "ca" => "北美洲",
+        "br" | "arg" | "cl" | "co" | "pe" => "南美洲",
+        "au" | "nz" => "大洋洲",
+        "za" | "eg" | "ng" | "ke" | "ma" => "非洲",
+        "aq" => "南极洲",
         _ => "其他地区",
     }
 }
 
 pub fn region_sort_rank(area: &str) -> usize {
     const ORDER: &[&str] = &[
-        "hk", "tw", "jp", "kr", "asia",
-        "sea", "my", "vn", "ph", "idn", "ind", "pk",
-        "de", "eu", "ru", "tr", "ua", "kaz",
-        "us", "au", "br", "arg", "mx",
+        "hk", "tw", "jp", "kr", "sea", "my", "vn", "ph", "idn", "ind", "pk", "tr", "kaz", "asia",
+        "de", "eu", "ru", "ua",
+        "us", "mx",
+        "br", "arg",
+        "au",
     ];
     let low = area.trim().to_lowercase();
     ORDER.iter().position(|&k| k == low).unwrap_or(999)

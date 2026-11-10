@@ -330,7 +330,7 @@ fn build_main_window(app: &adw::Application) -> MainWidgets {
     hero.append(&main_btn);
 
     let region_row = adw::ActionRow::builder().title("区服").activatable(true).build();
-    let region_val = gtk::Label::new(Some("东亚·港澳台 · 中国香港"));
+    let region_val = gtk::Label::new(Some("亚洲 · 中国香港"));
     region_val.add_css_class("dim-label");
     let region_arrow = gtk::Image::from_icon_name("go-next-symbolic");
     region_arrow.add_css_class("dim-label");
@@ -462,7 +462,7 @@ fn build_region_dialog(
 ) -> (adw::Dialog, Rc<dyn Fn()>) {
     let dialog = adw::Dialog::builder()
         .title("选择加速区服")
-        .content_width(440)
+        .content_width(480)
         .content_height(560)
         .build();
     let filter_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -493,7 +493,7 @@ fn build_region_dialog(
     view.set_content(Some(&vbox));
     dialog.set_child(Some(&view));
 
-    let rebuild: Rc<dyn Fn()> = {
+    let rebuild_list: Rc<dyn Fn()> = {
         let state = state.clone();
         let list_box = list_box.clone();
         let dlg = dialog.clone();
@@ -555,33 +555,59 @@ fn build_region_dialog(
         })
     };
 
-    let tabs = [
-        ("全部", ""),
-        ("东亚", "东亚·港澳台"),
-        ("东南亚", "东南亚·南亚"),
-        ("欧俄", "欧洲·俄区"),
-        ("美洲·澳", "美洲·大洋洲"),
-    ];
-    let mut first_btn: Option<gtk::ToggleButton> = None;
-    for (label, cont_val) in tabs {
-        let b = gtk::ToggleButton::with_label(label);
-        if let Some(ref f) = first_btn {
-            b.set_group(Some(f));
-        } else {
-            b.set_active(true);
-            first_btn = Some(b.clone());
-        }
+    let rebuild: Rc<dyn Fn()> = {
         let state = state.clone();
-        let rebuild = rebuild.clone();
-        let cont_str = cont_val.to_string();
-        b.connect_toggled(move |btn| {
-            if btn.is_active() {
-                state.borrow_mut().continent_filter = cont_str.clone();
-                rebuild();
+        let filter_bar = filter_bar.clone();
+        let rebuild_list = rebuild_list.clone();
+        Rc::new(move || {
+            while let Some(child) = filter_bar.first_child() {
+                filter_bar.remove(&child);
             }
-        });
-        filter_bar.append(&b);
-    }
+            let active_filter = {
+                let mut st = state.borrow_mut();
+                if !st.continent_filter.is_empty()
+                    && !st.profiles.iter().any(|p| p.continent == st.continent_filter)
+                {
+                    st.continent_filter.clear();
+                }
+                st.continent_filter.clone()
+            };
+
+            let mut tabs: Vec<(&str, &str)> = vec![("全部", "")];
+            {
+                let st = state.borrow();
+                for &cont in &CONTINENT_ORDER {
+                    if st.profiles.iter().any(|p| p.continent == cont) {
+                        tabs.push((cont, cont));
+                    }
+                }
+            }
+
+            let mut first_btn: Option<gtk::ToggleButton> = None;
+            for (label, cont_val) in tabs {
+                let b = gtk::ToggleButton::with_label(label);
+                if let Some(ref f) = first_btn {
+                    b.set_group(Some(f));
+                } else {
+                    first_btn = Some(b.clone());
+                }
+                if cont_val == active_filter {
+                    b.set_active(true);
+                }
+                let state = state.clone();
+                let rebuild_list = rebuild_list.clone();
+                let cont_str = cont_val.to_string();
+                b.connect_toggled(move |btn| {
+                    if btn.is_active() {
+                        state.borrow_mut().continent_filter = cont_str.clone();
+                        rebuild_list();
+                    }
+                });
+                filter_bar.append(&b);
+            }
+            rebuild_list();
+        })
+    };
 
     (dialog, rebuild)
 }
