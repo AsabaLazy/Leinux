@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  issues: write
+  contents: write
+  pull-requests: write
 
 jobs:
   check-core:
@@ -31,50 +31,72 @@ jobs:
 
           live_bin=$(sha256sum "$tmp/acc-gw.router.amd64" | awk '{print $1}')
           live_xdb=$(sha256sum "$tmp/ipdatacloud_country.xdb" | awk '{print $1}')
-          live_ver=$(grep -aoP 'ipPortProtocolReport\x00\K[0-9]+(?:\.[0-9]+)+' "$tmp/acc-gw.router.amd64" | head -n1 || true)
-          live_ver=${live_ver:-unknown}
+          detected_ver=$(grep -aoP 'ipPortProtocolReport\x00\K[0-9]+(?:\.[0-9]+)+' "$tmp/acc-gw.router.amd64" | head -n1 || true)
+          new_ver=${detected_ver:-$pinned_ver}
+          display_ver=${detected_ver:-unknown}
 
           echo "Pinned:   ver=$pinned_ver bin=$pinned_bin xdb=$pinned_xdb"
-          echo "Upstream: ver=$live_ver bin=$live_bin xdb=$live_xdb"
+          echo "Upstream: ver=$display_ver bin=$live_bin xdb=$live_xdb"
 
           if [ "$pinned_bin" = "$live_bin" ] && [ "$pinned_xdb" = "$live_xdb" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          sed -i "s/^version=.*/version=${new_ver}/" opt/leigod/config/acc_version.ini
+          sed -i "s/^BIN_SHA256=.*/BIN_SHA256=\"${live_bin}\"/" install.sh
+          sed -i "s/^XDB_SHA256=.*/XDB_SHA256=\"${live_xdb}\"/" install.sh
+
           {
             echo "changed=true"
             echo "pinned_ver=$pinned_ver"
-            echo "live_ver=$live_ver"
+            echo "new_ver=$new_ver"
+            echo "display_ver=$display_ver"
             echo "pinned_bin=$pinned_bin"
             echo "live_bin=$live_bin"
             echo "pinned_xdb=$pinned_xdb"
             echo "live_xdb=$live_xdb"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Notify via GitHub Issue when upstream changes
+      - name: Create or update Pull Request
         if: steps.probe.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PINNED_VER: ${{ steps.probe.outputs.pinned_ver }}
-          LIVE_VER: ${{ steps.probe.outputs.live_ver }}
+          NEW_VER: ${{ steps.probe.outputs.new_ver }}
+          DISPLAY_VER: ${{ steps.probe.outputs.display_ver }}
           PINNED_BIN: ${{ steps.probe.outputs.pinned_bin }}
           LIVE_BIN: ${{ steps.probe.outputs.live_bin }}
           PINNED_XDB: ${{ steps.probe.outputs.pinned_xdb }}
           LIVE_XDB: ${{ steps.probe.outputs.live_xdb }}
         run: |
-          title="chore(core): 检测到雷神官方上游组件更新 (${LIVE_VER})"
-          existing=$(gh issue list --repo "${{ github.repository }}" --state open --search "检测到雷神官方上游组件更新 in:title" --json number -q '.[0].number' || true)
+          set -euo pipefail
+          branch="chore/update-leigod-core"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add install.sh opt/leigod/config/acc_version.ini
+          git commit -m "chore(core): update Leigod core to ${NEW_VER}"
+          git push --force origin "$branch"
+
+          title="chore(core): 更新雷神官方上游组件 (${DISPLAY_VER})"
           body=$(printf '%s\n' \
-            "定时巡检发现 \`http://119.3.40.126\` 上游文件哈希发生变动，请先在本地测试隧道启动、停止及 \`LEIGOD_GUARD\` 兼容性后再更新锁定的哈希。" \
+            "定时巡检检测到 \`http://119.3.40.126\` 上游组件哈希变更，已自动更新 \`install.sh\` 与 \`acc_version.ini\`。" \
             "" \
             "| 项目 | 当前锁定值 | 上游最新值 |" \
             "| :--- | :--- | :--- |" \
-            "| 内核版本 (\`acc_version.ini\`) | \`${PINNED_VER}\` | \`${LIVE_VER}\` |" \
+            "| 内核版本 (\`acc_version.ini\`) | \`${PINNED_VER}\` | \`${DISPLAY_VER}\` |" \
             "| \`acc-gw.router.amd64\` SHA-256 | \`${PINNED_BIN}\` | \`${LIVE_BIN}\` |" \
-            "| \`ipdatacloud_country.xdb\` SHA-256 | \`${PINNED_XDB}\` | \`${LIVE_XDB}\` |")
+            "| \`ipdatacloud_country.xdb\` SHA-256 | \`${PINNED_XDB}\` | \`${LIVE_XDB}\` |" \
+            "" \
+            "合并前建议在本地拉取实测（测完切记执行 \`leinux --pause\` 暂停时长）：" \
+            "\`\`\`bash" \
+            "gh pr checkout ${branch} && sudo ./install.sh && leinux --start && leinux --pause" \
+            "\`\`\`")
+
+          existing=$(gh pr list --repo "${{ github.repository }}" --head "$branch" --state open --json number -q '.[0].number' || true)
           if [ -n "$existing" ]; then
-            gh issue edit "$existing" --repo "${{ github.repository }}" --title "$title" --body "$body"
+            gh pr edit "$existing" --repo "${{ github.repository }}" --title "$title" --body "$body"
           else
-            gh issue create --repo "${{ github.repository }}" --title "$title" --body "$body"
+            gh pr create --repo "${{ github.repository }}" --base main --head "$branch" --title "$title" --body "$body"
           fi
