@@ -14,6 +14,7 @@ use std::net::TcpStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{self, Command};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread;
 use std::time::Duration;
 use types::{DaemonSnapshot, CONTINENT_ORDER};
@@ -101,14 +102,15 @@ fn ensure_services() {
 
 fn print_help() {
     println!(
-        "用法: lgd [选项]  (或 leinux [选项])
+        "用法: lgd [选项]  或  lgd [-a 区服] <程序命令...>
 
 Leinux — 雷神加速器 Linux 原生 GTK4 客户端与命令行工具
 
 选项:
   (无参数)             自动拉起后台服务并打开原生 GTK4 控制面板窗口
+  [-a 区服] <命令...>  按进程树专享加速运行程序，退出自动暂停时长 (Steam 填: lgd %command%)
   --login              弹出官方登录小窗口，登录成功后自动完成设备绑定与凭证保存
-  --start [AREA]       免开界面恢复时长并启动加速 (不传参数则使用上次选择的区服)
+  --start [AREA]       免开界面恢复时长并启动全局加速 (不传参数则使用上次选择的区服)
   --list               按七大洲分类列出云端动态同步的全部可用区服及节点数
   --pause              仅断开加速隧道并暂停官网账号时长 (保持后台服务运行)
   --stop               暂停官网账号时长并停止后台服务
@@ -210,7 +212,8 @@ fn cmd_status() -> Result<(), String> {
             .find(|p| p.area == snap.active_area)
             .map_or(snap.active_area.as_str(), |p| p.name.as_str());
         let delay = if snap.net_delay > 0 { format!("{} ms", snap.net_delay) } else { "- ms".to_string() };
-        (format!("{name} · 加速中 ({})", snap.tun_interface), delay)
+        let mode = if snap.scoped_procs > 0 { "进程专享" } else { "加速中" };
+        (format!("{name} · {mode} ({})", snap.tun_interface), delay)
     } else {
         ("待加速".to_string(), "- ms".to_string())
     };
@@ -252,6 +255,63 @@ fn cmd_port(port_str: &str) -> Result<(), String> {
     Ok(())
 }
 
+static WRAPPER_CHILD_PID: AtomicI32 = AtomicI32::new(0);
+static WRAPPER_LAST_SIG: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn forward_wrapper_sig(sig: libc::c_int) {
+    WRAPPER_LAST_SIG.store(sig, Ordering::SeqCst);
+    let pid = WRAPPER_CHILD_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, sig);
+        }
+    }
+}
+
+fn cmd_wrap_exec(area: &str, cmd_args: &[String]) -> Result<i32, String> {
+    let area = area.trim().to_lowercase();
+    ensure_services();
+    let self_pid = process::id();
+    let res = http_request(
+        "POST",
+        "/api/acc/start",
+        Some(&json!({ "area": area, "recover": true, "cgroup_pid": self_pid })),
+        15000,
+    )?;
+    if res["ok"].as_bool() != Some(true) {
+        return Err(res["msg"].as_str().unwrap_or("启动进程专享加速失败").to_string());
+    }
+
+    let mut child = match Command::new(&cmd_args[0]).args(&cmd_args[1..]).spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = http_request("POST", "/api/acc/release-cgroup", Some(&json!({ "pid": self_pid })), 5000);
+            return Err(format!("无法启动目标程序 '{}': {e}", cmd_args[0]));
+        }
+    };
+
+    WRAPPER_CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
+    unsafe {
+        let handler = forward_wrapper_sig as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGHUP, handler);
+    }
+
+    let wait_res = child.wait();
+    WRAPPER_CHILD_PID.store(0, Ordering::SeqCst);
+    let _ = http_request("POST", "/api/acc/release-cgroup", Some(&json!({ "pid": self_pid })), 8000);
+
+    let code = match wait_res {
+        Ok(st) => st.code().unwrap_or_else(|| {
+            let sig = WRAPPER_LAST_SIG.load(Ordering::SeqCst);
+            if sig > 0 { 128 + sig } else { 1 }
+        }),
+        Err(_) => 1,
+    };
+    Ok(code)
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -268,9 +328,37 @@ fn run() -> Result<(), String> {
             let port_str = args.get(1).ok_or("--port 需要指定端口号")?;
             cmd_port(port_str)?;
         }
-        Some(other) => {
+        Some("-a" | "--area") => {
+            let area = args.get(1).ok_or("-a/--area 需要指定区服代号，例如: lgd -a jp %command%")?;
+            let rest = &args[2..];
+            let cmd = rest.strip_prefix(&["--".to_string()]).unwrap_or(rest);
+            if cmd.is_empty() {
+                return Err("请指定要加速运行的程序命令，例如: lgd -a jp %command%".to_string());
+            }
+            let code = cmd_wrap_exec(area, cmd)?;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Some("--") => {
+            let cmd = &args[1..];
+            if cmd.is_empty() {
+                return Err("请指定要加速运行的程序命令，例如: lgd %command%".to_string());
+            }
+            let code = cmd_wrap_exec("", cmd)?;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Some(other) if other.starts_with('-') => {
             print_help();
             return Err(format!("未知选项: {other}"));
+        }
+        Some(_) => {
+            let code = cmd_wrap_exec("", &args)?;
+            if code != 0 {
+                process::exit(code);
+            }
         }
         None => {
             ensure_services();

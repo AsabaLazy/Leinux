@@ -159,6 +159,8 @@ pub struct DaemonSnapshot {
     pub udp_6066: String,
     pub version: String,
     pub is_accelerating: bool,
+    #[serde(default)]
+    pub scoped_procs: usize,
     pub active_area: String,
     #[serde(default)]
     pub last_area: String,

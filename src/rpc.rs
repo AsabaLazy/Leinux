@@ -1,7 +1,7 @@
 use crate::net::{
     detect_gateway_ip, flush_dns_cache, has_active_tun, install_mangle_guard, read_device_mac,
-    read_ini_values, read_json_or_default, remove_mangle_guard, run_cleanup_net, set_stop_enforced,
-    state_dir, write_json_atomic,
+    read_ini_values, read_json_or_default, remove_mangle_guard, run_cleanup_net, set_scoped_mode,
+    set_stop_enforced, state_dir, write_json_atomic,
 };
 use crate::profiles::cached_profile_p_token;
 use crate::types::{
@@ -501,6 +501,7 @@ pub fn pause_account_time() -> Value {
         }
     }
     set_stop_enforced(true);
+    set_scoped_mode(false);
     if has_active_tun() {
         run_cleanup_net();
     }

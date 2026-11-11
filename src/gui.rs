@@ -721,6 +721,8 @@ impl MainWidgets {
         self.total_val.set_text(&format_bytes((snap.rx_bytes + snap.tx_bytes) as f64, 1));
         if snap.traffic_iface.is_empty() {
             self.iface_val.set_text(&snap.udp_6066);
+        } else if snap.scoped_procs > 0 {
+            self.iface_val.set_text(&format!("进程专享 · {} · {}", snap.traffic_iface, snap.udp_6066));
         } else {
             self.iface_val.set_text(&format!("{} · {}", snap.traffic_iface, snap.udp_6066));
         }

@@ -1,7 +1,8 @@
 use crate::net::{
-    check_firewall_periodic, check_plugin_service, flush_dns_cache, has_active_tun,
-    install_mangle_guard, list_tun_interfaces, probe_udp_6066, read_iface_bytes, read_ini_values,
-    resolve_local_dns_list, run_cleanup_net, set_stop_enforced,
+    attach_pid_to_game_cgroup, check_firewall_periodic, check_plugin_service,
+    count_game_cgroup_procs, flush_dns_cache, has_active_tun, install_mangle_guard, is_scoped_mode,
+    list_tun_interfaces, probe_udp_6066, read_iface_bytes, read_ini_values,
+    resolve_local_dns_list, run_cleanup_net, set_scoped_mode, set_stop_enforced,
 };
 use crate::profiles::{
     invalidate_profile_cache, prepare_live_conf, refresh_cloud_profiles, sanitize_acc_conf,
@@ -83,6 +84,7 @@ fn build_daemon_snapshot(known_rev: u64, include_account: bool) -> DaemonSnapsho
         udp_6066: probe_udp_6066().to_string(),
         version: ini.version,
         is_accelerating: acc.is_accelerating,
+        scoped_procs: if is_scoped_mode() { count_game_cgroup_procs(None) } else { 0 },
         active_area: acc.active_area,
         last_area,
         net_delay: acc.net_delay,
@@ -152,7 +154,7 @@ fn handle_acc_start(req_json: &Value) -> (u16, Value) {
             400,
             json!({
                 "ok": false,
-                "msg": "未选择加速区服，首次使用请先选择区服（或执行 lgd --start <区服代号>，可用 lgd --list 查看），后续将自动记住上次选择"
+                "msg": "未选择加速区服，首次使用请先选择区服（或执行 lgd -a <区服> <命令>，可用 lgd --list 查看），后续将自动记住上次选择"
             }),
         );
     }
@@ -165,8 +167,33 @@ fn handle_acc_start(req_json: &Value) -> (u16, Value) {
         );
     };
 
+    let cgroup_pid = req_json["cgroup_pid"].as_u64().and_then(|n| u32::try_from(n).ok());
+    if let Some(pid) = cgroup_pid {
+        if let Err(msg) = attach_pid_to_game_cgroup(pid) {
+            return (500, json!({"ok": false, "msg": msg}));
+        }
+    } else if count_game_cgroup_procs(None) == 0 {
+        set_scoped_mode(false);
+    }
+
     if req_json["recover"].as_bool().unwrap_or(true) {
         let _ = webapi_post_with_auto_renew("/api/user/recover");
+    }
+
+    if cgroup_pid.is_some() && has_active_tun() {
+        let cur = query_active_acc_state(&read_ini_values().rtoken);
+        if cur.is_accelerating && cur.active_area.eq_ignore_ascii_case(&prof.summary.area) {
+            install_mangle_guard();
+            return (
+                200,
+                json!({
+                    "ok": true,
+                    "code": 0,
+                    "area": prof.summary.area,
+                    "name": prof.summary.name,
+                }),
+            );
+        }
     }
 
     match execute_start_for_conf(prof.summary.catalog, prof.summary.sub_catalog, &prof.conf) {
@@ -179,8 +206,29 @@ fn handle_acc_start(req_json: &Value) -> (u16, Value) {
                 "name": prof.summary.name,
             }),
         ),
-        Ok(resp) => (502, json!({"ok": false, "code": resp["code"], "msg": "启动加速失败", "rpc": resp})),
-        Err(e) => (502, json!({"ok": false, "code": -1, "msg": e})),
+        Ok(resp) => {
+            if cgroup_pid.is_some() && count_game_cgroup_procs(cgroup_pid) == 0 {
+                set_scoped_mode(false);
+            }
+            (502, json!({"ok": false, "code": resp["code"], "msg": "启动加速失败", "rpc": resp}))
+        }
+        Err(e) => {
+            if cgroup_pid.is_some() && count_game_cgroup_procs(cgroup_pid) == 0 {
+                set_scoped_mode(false);
+            }
+            (502, json!({"ok": false, "code": -1, "msg": e}))
+        }
+    }
+}
+
+fn handle_release_cgroup(req_json: &Value) -> Value {
+    let exclude_pid = req_json["pid"].as_u64().and_then(|n| u32::try_from(n).ok());
+    let remaining = count_game_cgroup_procs(exclude_pid);
+    if is_scoped_mode() && remaining == 0 {
+        let pause_res = pause_account_time();
+        json!({ "ok": true, "paused": true, "remaining": 0, "pause": pause_res })
+    } else {
+        json!({ "ok": true, "paused": false, "remaining": remaining })
     }
 }
 
@@ -354,6 +402,9 @@ fn handle_client(stream: TcpStream) {
             let (code, val) = handle_acc_start(&req_json);
             send_json(stream, code, &val);
         }
+        ("POST", "/api/acc/release-cgroup") => {
+            send_json(stream, 200, &handle_release_cgroup(&req_json));
+        }
         ("POST", "/api/device/repair") => {
             let (code, val) = handle_device_repair();
             send_json(stream, code, &val);
@@ -424,6 +475,7 @@ pub fn run_daemon() {
     let wake_addr = bind_addr.clone();
     thread::spawn(move || {
         let mut tick = 0u32;
+        let mut empty_scoped_ticks = 0u8;
         loop {
             if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
                 let _ = TcpStream::connect(&wake_addr);
@@ -431,6 +483,19 @@ pub fn run_daemon() {
             }
             if tick.is_multiple_of(10) {
                 let _ = scan_profiles();
+                if is_scoped_mode() {
+                    if count_game_cgroup_procs(None) == 0 {
+                        empty_scoped_ticks = empty_scoped_ticks.saturating_add(1);
+                        if empty_scoped_ticks >= 2 {
+                            empty_scoped_ticks = 0;
+                            let _ = pause_account_time();
+                        }
+                    } else {
+                        empty_scoped_ticks = 0;
+                    }
+                } else {
+                    empty_scoped_ticks = 0;
+                }
                 check_firewall_periodic(tick.is_multiple_of(150));
             }
             tick = tick.wrapping_add(1);

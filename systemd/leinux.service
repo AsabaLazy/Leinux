@@ -15,10 +15,10 @@ RestartSec=3
 
 StateDirectory=leigod
 StateDirectoryMode=0700
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_SYS_NICE CAP_DAC_OVERRIDE
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/leigod/config /var/lib/leigod
+ReadWritePaths=/opt/leigod/config /var/lib/leigod /sys/fs/cgroup
 ProtectHome=read-only
 
 [Install]

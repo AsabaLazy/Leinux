@@ -17,7 +17,11 @@ const BYPASS_DNS_KEYWORDS: [&str; 9] = [
     "google", "gstatic", "youtube", "1e100", "ggpht", "anthropic", "claude", "openai", "github",
 ];
 
+const GAME_CGROUP_NAME: &str = "leinux-games";
+const GAME_CGROUP_DIR: &str = "/sys/fs/cgroup/leinux-games";
+
 static STOP_ENFORCED: AtomicBool = AtomicBool::new(false);
+static SCOPED_MODE: AtomicBool = AtomicBool::new(false);
 static FW_VERIFIED_CLEAN: AtomicBool = AtomicBool::new(false);
 static CACHED_PLUGIN_PID: AtomicU32 = AtomicU32::new(0);
 
@@ -38,6 +42,37 @@ pub fn set_stop_enforced(enforced: bool) {
 
 pub fn is_stop_enforced() -> bool {
     STOP_ENFORCED.load(Ordering::SeqCst)
+}
+
+pub fn set_scoped_mode(scoped: bool) {
+    SCOPED_MODE.store(scoped, Ordering::SeqCst);
+    FW_VERIFIED_CLEAN.store(false, Ordering::SeqCst);
+}
+
+pub fn is_scoped_mode() -> bool {
+    SCOPED_MODE.load(Ordering::SeqCst)
+}
+
+pub fn attach_pid_to_game_cgroup(pid: u32) -> Result<(), String> {
+    if !Path::new(&format!("/proc/{pid}")).exists() {
+        return Err(format!("目标进程 {pid} 不存在"));
+    }
+    fs::create_dir_all(GAME_CGROUP_DIR)
+        .map_err(|e| format!("无法创建游戏 cgroup ({GAME_CGROUP_DIR}): {e}"))?;
+    fs::write(Path::new(GAME_CGROUP_DIR).join("cgroup.procs"), format!("{pid}\n"))
+        .map_err(|e| format!("无法将进程 {pid} 移入游戏 cgroup: {e}"))?;
+    set_scoped_mode(true);
+    Ok(())
+}
+
+pub fn count_game_cgroup_procs(exclude_pid: Option<u32>) -> usize {
+    let Ok(text) = fs::read_to_string(Path::new(GAME_CGROUP_DIR).join("cgroup.procs")) else {
+        return 0;
+    };
+    text.lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .filter(|&p| Some(p) != exclude_pid && Path::new(&format!("/proc/{p}")).exists())
+        .count()
 }
 
 pub fn state_dir() -> PathBuf {
@@ -332,6 +367,12 @@ pub fn install_mangle_guard() {
     for kw in BYPASS_DNS_KEYWORDS {
         batch.push_str(&format!(
             "-A LEIGOD_GUARD -p udp --dport 53 -m string --algo bm --icase --string {kw} -j ACCEPT\n"
+        ));
+    }
+    if is_scoped_mode() && fs::create_dir_all(GAME_CGROUP_DIR).is_ok() {
+        batch.push_str(&format!(
+            "-A LEIGOD_GUARD -p udp --dport 53 -j RETURN\n\
+             -A LEIGOD_GUARD -m cgroup ! --path {GAME_CGROUP_NAME} -j ACCEPT\n"
         ));
     }
     batch.push_str(
