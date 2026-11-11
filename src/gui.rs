@@ -1,5 +1,5 @@
 use crate::http_request;
-use crate::login::{find_chromium_binary, run_browser_login_popup};
+use crate::login::{has_login_browser, run_browser_login_popup};
 use crate::types::{AccountSnapshot, DaemonSnapshot, ProfileSummary, CONTINENT_ORDER};
 use adw::prelude::*;
 use gtk4 as gtk;
@@ -1028,11 +1028,11 @@ impl UiCtx {
     }
 
     fn start_popup_login(&self, open_prefs_on_missing_browser: bool) {
-        if find_chromium_binary().is_none() {
+        if !has_login_browser() {
             if open_prefs_on_missing_browser {
                 self.present_prefs();
             }
-            self.toast("未检测到 Chrome / Chromium / Edge 浏览器，请手动填入 Token");
+            self.toast("未检测到可用浏览器（Chromium / Firefox），请手动填入 Token");
             return;
         }
         let auto_pause = self.pw.auto_pause_row.is_active();

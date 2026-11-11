@@ -109,77 +109,104 @@ fn write_ws_frame(sock: &mut TcpStream, opcode: u8, payload: &[u8]) -> Result<()
     sock.write_all(&frame).map_err(|e| e.to_string())
 }
 
+pub struct WsClient {
+    sock: TcpStream,
+    reader: BufReader<TcpStream>,
+}
+
+impl WsClient {
+    pub fn connect(host: &str, port: u16, path: &str, timeout_ms: u64) -> Result<Self, String> {
+        let addr: SocketAddr = format!("{host}:{port}")
+            .parse()
+            .map_err(|e| format!("Invalid address: {e}"))?;
+        let timeout = Duration::from_millis(timeout_ms);
+        let mut sock = TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
+        let _ = sock.set_nodelay(true);
+        let _ = sock.set_read_timeout(Some(timeout));
+        let _ = sock.set_write_timeout(Some(timeout));
+
+        let handshake = format!(
+            "GET {path} HTTP/1.1\r\n\
+             Host: {host}:{port}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n"
+        );
+        sock.write_all(handshake.as_bytes()).map_err(|e| e.to_string())?;
+
+        let mut reader = BufReader::with_capacity(4096, sock.try_clone().map_err(|e| e.to_string())?);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).map_err(|e| e.to_string())?;
+        if !status_line.contains("101") {
+            return Err(format!("WebSocket handshake rejected: {}", status_line.trim()));
+        }
+        loop {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+            if n == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+        }
+        Ok(Self { sock, reader })
+    }
+
+    pub fn set_timeout(&self, timeout_ms: u64) {
+        let timeout = Some(Duration::from_millis(timeout_ms));
+        let _ = self.sock.set_read_timeout(timeout);
+        let _ = self.sock.set_write_timeout(timeout);
+    }
+
+    pub fn call(&mut self, payload: &Value) -> Result<Value, String> {
+        write_ws_frame(&mut self.sock, 0x1, &payload.to_string().into_bytes())?;
+        let expected_id = payload.get("id");
+
+        loop {
+            let mut hdr = [0u8; 2];
+            self.reader.read_exact(&mut hdr).map_err(|e| e.to_string())?;
+            let opcode = hdr[0] & 0x0f;
+            let masked = (hdr[1] & 0x80) != 0;
+            let mut r_len = (hdr[1] & 0x7f) as usize;
+            if r_len == 126 {
+                let mut b = [0u8; 2];
+                self.reader.read_exact(&mut b).map_err(|e| e.to_string())?;
+                r_len = u16::from_be_bytes(b) as usize;
+            } else if r_len == 127 {
+                let mut b = [0u8; 8];
+                self.reader.read_exact(&mut b).map_err(|e| e.to_string())?;
+                r_len = u64::from_be_bytes(b) as usize;
+            }
+            let mut srv_mask = [0u8; 4];
+            if masked {
+                self.reader.read_exact(&mut srv_mask).map_err(|e| e.to_string())?;
+            }
+            let mut data = vec![0u8; r_len.min(4 * 1024 * 1024)];
+            self.reader.read_exact(&mut data).map_err(|e| e.to_string())?;
+            if masked {
+                for (i, b) in data.iter_mut().enumerate() {
+                    *b ^= srv_mask[i % 4];
+                }
+            }
+            match opcode {
+                0x8 => return Err("WebSocket closed by server".to_string()),
+                0x9 => {
+                    let _ = write_ws_frame(&mut self.sock, 0xA, &data);
+                }
+                0xA => continue,
+                _ => {
+                    let val: Value = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+                    if expected_id.is_some_and(|id| val.get("id") != Some(id)) {
+                        continue;
+                    }
+                    return Ok(val);
+                }
+            }
+        }
+    }
+}
+
 pub fn ws_rpc_call(host: &str, port: u16, path: &str, payload: &Value, timeout_ms: u64) -> Result<Value, String> {
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .map_err(|e| format!("Invalid address: {e}"))?;
-    let timeout = Duration::from_millis(timeout_ms);
-    let mut sock = TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
-    let _ = sock.set_nodelay(true);
-    let _ = sock.set_read_timeout(Some(timeout));
-    let _ = sock.set_write_timeout(Some(timeout));
-
-    let handshake = format!(
-        "GET {path} HTTP/1.1\r\n\
-         Host: {host}:{port}\r\n\
-         Upgrade: websocket\r\n\
-         Connection: Upgrade\r\n\
-         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-         Sec-WebSocket-Version: 13\r\n\r\n"
-    );
-    sock.write_all(handshake.as_bytes()).map_err(|e| e.to_string())?;
-
-    let mut reader = BufReader::with_capacity(4096, sock.try_clone().map_err(|e| e.to_string())?);
-    let mut status_line = String::new();
-    reader.read_line(&mut status_line).map_err(|e| e.to_string())?;
-    if !status_line.contains("101") {
-        return Err(format!("WebSocket handshake rejected: {}", status_line.trim()));
-    }
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        if n == 0 || line == "\r\n" || line == "\n" {
-            break;
-        }
-    }
-
-    write_ws_frame(&mut sock, 0x1, &payload.to_string().into_bytes())?;
-
-    loop {
-        let mut hdr = [0u8; 2];
-        reader.read_exact(&mut hdr).map_err(|e| e.to_string())?;
-        let opcode = hdr[0] & 0x0f;
-        let masked = (hdr[1] & 0x80) != 0;
-        let mut r_len = (hdr[1] & 0x7f) as usize;
-        if r_len == 126 {
-            let mut b = [0u8; 2];
-            reader.read_exact(&mut b).map_err(|e| e.to_string())?;
-            r_len = u16::from_be_bytes(b) as usize;
-        } else if r_len == 127 {
-            let mut b = [0u8; 8];
-            reader.read_exact(&mut b).map_err(|e| e.to_string())?;
-            r_len = u64::from_be_bytes(b) as usize;
-        }
-        let mut srv_mask = [0u8; 4];
-        if masked {
-            reader.read_exact(&mut srv_mask).map_err(|e| e.to_string())?;
-        }
-        let mut data = vec![0u8; r_len.min(4 * 1024 * 1024)];
-        reader.read_exact(&mut data).map_err(|e| e.to_string())?;
-        if masked {
-            for (i, b) in data.iter_mut().enumerate() {
-                *b ^= srv_mask[i % 4];
-            }
-        }
-        match opcode {
-            0x8 => return Err("WebSocket closed by server".to_string()),
-            0x9 => {
-                let _ = write_ws_frame(&mut sock, 0xA, &data);
-            }
-            0xA => continue,
-            _ => return serde_json::from_slice(&data).map_err(|e| e.to_string()),
-        }
-    }
+    WsClient::connect(host, port, path, timeout_ms)?.call(payload)
 }
 
 pub fn core_rpc(cmd: &str, data: Value, timeout_ms: u64) -> Result<Value, String> {
