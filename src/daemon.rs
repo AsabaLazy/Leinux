@@ -3,6 +3,7 @@ use crate::net::{
     count_game_cgroup_procs, flush_dns_cache, has_active_tun, install_mangle_guard, is_scoped_mode,
     list_tun_interfaces, probe_udp_6066, read_iface_bytes, read_ini_values,
     resolve_local_dns_list, run_cleanup_net, set_scoped_mode, set_stop_enforced,
+    unregister_scoped_root_pid,
 };
 use crate::profiles::{
     invalidate_profile_cache, prepare_live_conf, refresh_cloud_profiles, sanitize_acc_conf,
@@ -172,6 +173,15 @@ fn handle_acc_start(req_json: &Value) -> (u16, Value) {
         if let Err(msg) = attach_pid_to_game_cgroup(pid) {
             return (500, json!({"ok": false, "msg": msg}));
         }
+        thread::spawn(|| {
+            for _ in 0..24 {
+                thread::sleep(Duration::from_millis(250));
+                if !is_scoped_mode() {
+                    break;
+                }
+                let _ = count_game_cgroup_procs(None);
+            }
+        });
     } else if count_game_cgroup_procs(None) == 0 {
         set_scoped_mode(false);
     }
@@ -223,6 +233,9 @@ fn handle_acc_start(req_json: &Value) -> (u16, Value) {
 
 fn handle_release_cgroup(req_json: &Value) -> Value {
     let exclude_pid = req_json["pid"].as_u64().and_then(|n| u32::try_from(n).ok());
+    if let Some(pid) = exclude_pid {
+        unregister_scoped_root_pid(pid);
+    }
     let remaining = count_game_cgroup_procs(exclude_pid);
     if is_scoped_mode() && remaining == 0 {
         let pause_res = pause_account_time();

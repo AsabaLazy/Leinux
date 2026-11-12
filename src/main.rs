@@ -268,6 +268,21 @@ extern "C" fn forward_wrapper_sig(sig: libc::c_int) {
     }
 }
 
+fn build_wrapped_argv(cmd_args: &[String]) -> Vec<String> {
+    let is_steam_wrapper = Path::new(&cmd_args[0])
+        .file_name()
+        .and_then(|s| s.to_str())
+        == Some("steam-launch-wrapper");
+    if !is_steam_wrapper || cmd_args.iter().any(|a| a == "--no-scope") {
+        return cmd_args.to_vec();
+    }
+    let mut out = Vec::with_capacity(cmd_args.len() + 1);
+    out.push(cmd_args[0].clone());
+    out.push("--no-scope".to_string());
+    out.extend_from_slice(&cmd_args[1..]);
+    out
+}
+
 fn cmd_wrap_exec(area: &str, cmd_args: &[String]) -> Result<i32, String> {
     let area = area.trim().to_lowercase();
     ensure_services();
@@ -282,11 +297,16 @@ fn cmd_wrap_exec(area: &str, cmd_args: &[String]) -> Result<i32, String> {
         return Err(res["msg"].as_str().unwrap_or("启动进程专享加速失败").to_string());
     }
 
-    let mut child = match Command::new(&cmd_args[0]).args(&cmd_args[1..]).spawn() {
+    let argv = build_wrapped_argv(cmd_args);
+    let mut child = match Command::new(&argv[0])
+        .args(&argv[1..])
+        .env("STEAM_LAUNCH_WRAPPER_SCOPE", "0")
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => {
             let _ = http_request("POST", "/api/acc/release-cgroup", Some(&json!({ "pid": self_pid })), 5000);
-            return Err(format!("无法启动目标程序 '{}': {e}", cmd_args[0]));
+            return Err(format!("无法启动目标程序 '{}': {e}", argv[0]));
         }
     };
 

@@ -517,5 +517,9 @@ pub fn pause_account_time() -> Value {
         });
     }
     webapi_post_with_auto_renew("/api/user/pause")
+        .or_else(|_| {
+            thread::sleep(Duration::from_millis(500));
+            webapi_post_with_auto_renew("/api/user/pause")
+        })
         .unwrap_or_else(|e| json!({"code": -1, "msg": e}))
 }

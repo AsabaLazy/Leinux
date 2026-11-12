@@ -47,10 +47,26 @@ pub fn is_stop_enforced() -> bool {
 pub fn set_scoped_mode(scoped: bool) {
     SCOPED_MODE.store(scoped, Ordering::SeqCst);
     FW_VERIFIED_CLEAN.store(false, Ordering::SeqCst);
+    if !scoped {
+        if let Ok(mut roots) = scoped_roots().lock() {
+            roots.clear();
+        }
+    }
 }
 
 pub fn is_scoped_mode() -> bool {
     SCOPED_MODE.load(Ordering::SeqCst)
+}
+
+fn scoped_roots() -> &'static Mutex<BTreeSet<u32>> {
+    static ROOTS: OnceLock<Mutex<BTreeSet<u32>>> = OnceLock::new();
+    ROOTS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+pub fn unregister_scoped_root_pid(pid: u32) {
+    if let Ok(mut roots) = scoped_roots().lock() {
+        roots.remove(&pid);
+    }
 }
 
 pub fn attach_pid_to_game_cgroup(pid: u32) -> Result<(), String> {
@@ -61,11 +77,74 @@ pub fn attach_pid_to_game_cgroup(pid: u32) -> Result<(), String> {
         .map_err(|e| format!("无法创建游戏 cgroup ({GAME_CGROUP_DIR}): {e}"))?;
     fs::write(Path::new(GAME_CGROUP_DIR).join("cgroup.procs"), format!("{pid}\n"))
         .map_err(|e| format!("无法将进程 {pid} 移入游戏 cgroup: {e}"))?;
+    if let Ok(mut roots) = scoped_roots().lock() {
+        roots.retain(|&p| Path::new(&format!("/proc/{p}")).exists());
+        roots.insert(pid);
+    }
     set_scoped_mode(true);
     Ok(())
 }
 
+fn sync_descendants_to_game_cgroup() {
+    let cg_procs_path = Path::new(GAME_CGROUP_DIR).join("cgroup.procs");
+    let in_cg: BTreeSet<u32> = fs::read_to_string(&cg_procs_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .collect();
+
+    let mut seeds = in_cg.clone();
+    if let Ok(mut roots) = scoped_roots().lock() {
+        roots.retain(|&p| Path::new(&format!("/proc/{p}")).exists());
+        seeds.extend(roots.iter().copied());
+    }
+    if seeds.is_empty() {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir("/proc") else { return };
+    let mut children_map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else { continue };
+        let Some((_, after_comm)) = stat.rsplit_once(')') else { continue };
+        let Some(ppid) = after_comm
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if ppid > 1 {
+            children_map.entry(ppid).or_default().push(pid);
+        }
+    }
+
+    let mut visited = seeds.clone();
+    let mut stack: Vec<u32> = seeds.into_iter().collect();
+    while let Some(cur) = stack.pop() {
+        if let Some(kids) = children_map.get(&cur) {
+            for &k in kids {
+                if visited.insert(k) {
+                    stack.push(k);
+                }
+            }
+        }
+    }
+
+    for pid in visited {
+        if !in_cg.contains(&pid) {
+            let _ = fs::write(&cg_procs_path, format!("{pid}\n"));
+        }
+    }
+}
+
 pub fn count_game_cgroup_procs(exclude_pid: Option<u32>) -> usize {
+    if is_scoped_mode() {
+        sync_descendants_to_game_cgroup();
+    }
     let Ok(text) = fs::read_to_string(Path::new(GAME_CGROUP_DIR).join("cgroup.procs")) else {
         return 0;
     };
