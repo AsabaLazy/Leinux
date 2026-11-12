@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400">
+  <rect width="1200" height="400" rx="16" fill="#0b0907"/>
+  <g fill="#e5c07b">
+    <rect x="-100" y="55" width="160" height="2" opacity="0.55">
+      <animate attributeName="x" from="-200" to="1300" dur="0.85s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="-200" y="145" width="210" height="1" opacity="0.35">
+      <animate attributeName="x" from="-300" to="1300" dur="1.25s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="-50" y="245" width="180" height="2.5" opacity="0.7">
+      <animate attributeName="x" from="-200" to="1300" dur="0.65s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="-150" y="345" width="220" height="1.5" opacity="0.45">
+      <animate attributeName="x" from="-300" to="1300" dur="1.05s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="-120" y="100" width="110" height="1" opacity="0.6">
+      <animate attributeName="x" from="-160" to="1300" dur="0.95s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="-250" y="295" width="240" height="2" opacity="0.3">
+      <animate attributeName="x" from="-400" to="1300" dur="1.45s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+  <defs>
+    <filter id="logoGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="16" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+  <g transform="translate(600, 152)">
+    <g>
+      <animateTransform attributeName="transform" type="translate" values="0,-6; 0,6; 0,-6" dur="3s" repeatCount="indefinite"/>
+      <circle cx="0" cy="0" r="50" fill="#e5c07b" filter="url(#logoGlow)" opacity="0.28">
+        <animate attributeName="opacity" values="0.14; 0.45; 0.14" dur="2.2s" repeatCount="indefinite"/>
+        <animate attributeName="r" values="44; 64; 44" dur="2.2s" repeatCount="indefinite"/>
+      </circle>
+      <g>
+        <animateTransform attributeName="transform" type="scale" values="0.96; 1.04; 0.96" dur="2.2s" repeatCount="indefinite"/>
+        <g transform="scale(0.52) translate(-128, -128)">
+          <path fill="#e5c07b" d="M 128.00 13.00 A 115.00 115.00 0 1 1 128.00 243.00 A 115.00 115.00 0 1 1 128.00 13.00 Z M 128.00 20.00 A 108.00 108.00 0 1 0 128.00 236.00 A 108.00 108.00 0 1 0 128.00 20.00 Z M 144.15 36.41 A 93.00 93.00 0 0 1 215.39 159.81 L 210.69 158.10 A 88.00 88.00 0 0 0 143.28 41.34 Z M 199.24 187.78 A 93.00 93.00 0 0 1 56.76 187.78 L 60.59 184.57 A 88.00 88.00 0 0 0 195.41 184.57 Z M 40.61 159.81 A 93.00 93.00 0 0 1 111.85 36.41 L 112.72 41.34 A 88.00 88.00 0 0 0 45.31 158.10 Z M 198.16 52.15 A 3.20 3.20 0 1 1 198.16 58.55 A 3.20 3.20 0 1 1 198.16 52.15 Z M 215.47 74.30 A 3.20 3.20 0 1 1 215.47 80.70 A 3.20 3.20 0 1 1 215.47 74.30 Z M 226.00 100.37 A 3.20 3.20 0 1 1 226.00 106.77 A 3.20 3.20 0 1 1 226.00 100.37 Z M 155.84 221.89 A 3.20 3.20 0 1 1 155.84 228.29 A 3.20 3.20 0 1 1 155.84 221.89 Z M 128.00 225.80 A 3.20 3.20 0 1 1 128.00 232.20 A 3.20 3.20 0 1 1 128.00 225.80 Z M 100.16 221.89 A 3.20 3.20 0 1 1 100.16 228.29 A 3.20 3.20 0 1 1 100.16 221.89 Z M 30.00 100.37 A 3.20 3.20 0 1 1 30.00 106.77 A 3.20 3.20 0 1 1 30.00 100.37 Z M 40.53 74.30 A 3.20 3.20 0 1 1 40.53 80.70 A 3.20 3.20 0 1 1 40.53 74.30 Z M 57.84 52.15 A 3.20 3.20 0 1 1 57.84 58.55 A 3.20 3.20 0 1 1 57.84 52.15 Z M 120.50 39.50 A 7.50 7.50 0 0 1 135.50 39.50 L 135.50 66.50 A 7.50 7.50 0 0 1 120.50 66.50 Z M 208.39 165.75 A 7.50 7.50 0 0 1 200.89 178.75 L 177.51 165.25 A 7.50 7.50 0 0 1 185.01 152.25 Z M 55.11 178.75 A 7.50 7.50 0 0 1 47.61 165.75 L 70.99 152.25 A 7.50 7.50 0 0 1 78.49 165.25 Z"/>
+          <path fill="#ffffff" d="M 139.20 83.20 L 102.80 131.50 L 125.90 131.50 L 116.80 172.80 L 153.20 124.50 L 130.10 124.50 Z"/>
+        </g>
+      </g>
+    </g>
+  </g>
+  <text x="600" y="308" font-family="sans-serif" font-size="68" font-style="italic" font-weight="900" text-anchor="middle" fill="#ffffff" letter-spacing="8">LEINUX</text>
+</svg>
