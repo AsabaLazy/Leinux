@@ -1,6 +1,13 @@
 name: Check Leigod Upstream Core
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "install.sh"
+      - "opt/leigod/config/acc_version.ini"
+      - ".github/workflows/check-core.yml"
   schedule:
     # 每周一 09:00 (UTC+8) 自动对比雷神官方上游内核与 IP 库哈希
     - cron: "0 1 * * 1"
